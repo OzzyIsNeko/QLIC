@@ -60,7 +60,7 @@ qlic batch output-directory image1.png image2.webp image3.jxl
 
 The default is one thread. Use `--threads all` or `--threads N` when more are wanted. Every QLIC file created by this release decodes with the browser build.
 
-Input supports PNG, lossless WebP, lossless JPEG XL, lossless AVIF, TIFF, and BMP on Windows and Linux. Windows also accepts GIF. JPEG and inputs known to be lossy are rejected. QLIC currently accepts up to 8 bits per channel.
+Input supports PNG, lossless WebP, lossless JPEG XL, TIFF, and BMP on Windows and Linux. Lossless AVIF is built in on Linux and uses an installed WIC decoder on Windows. Windows also accepts GIF through WIC. JPEG and inputs known to be lossy are rejected. QLIC currently accepts up to 8 bits per channel.
 
 Linux and Windows both test the optional LZMS outer stage and keep it only when it makes the file smaller. Both forms decode on Windows, Linux, and in the browser.
 

@@ -10,6 +10,12 @@ param(
 $ErrorActionPreference = "Stop"
 New-Item -ItemType Directory -Force $Output | Out-Null
 
+function Test-WicAvifUnavailable {
+  param([object[]]$Message)
+  return (($Message | Out-String) -match
+    "WIC decoder failed: 0x88982f8b")
+}
+
 $accepted = @(
   "base.png",
   "base.bmp",
@@ -18,11 +24,21 @@ $accepted = @(
   "lossless.jxl",
   "lossless.avif"
 )
+$avifDecoderAvailable = $true
 $hashes = foreach ($name in $accepted) {
   $encoded = Join-Path $Output "$name.qlic"
   [IO.File]::Delete($encoded)
-  & $Qlic pack (Join-Path $Fixtures $name) $encoded --threads 1 | Out-Null
-  if ($LASTEXITCODE -ne 0) {
+  $message = @(
+    & $Qlic pack (Join-Path $Fixtures $name) $encoded --threads 1 2>&1
+  )
+  $status = $LASTEXITCODE
+  if ($status -ne 0 -and $name -eq "lossless.avif" -and
+      (Test-WicAvifUnavailable $message)) {
+    $avifDecoderAvailable = $false
+    Write-Host "lossless AVIF decode skipped because WIC is unavailable"
+    continue
+  }
+  if ($status -ne 0) {
     throw "QLIC rejected lossless input: $name"
   }
   (Get-FileHash -LiteralPath $encoded -Algorithm SHA256).Hash
@@ -53,8 +69,14 @@ if ($changed -ne 1) {
 [IO.File]::WriteAllBytes($ambiguousAvif, $ambiguousBytes)
 $ambiguousOutput = Join-Path $Output "ambiguous.avif.qlic"
 [IO.File]::Delete($ambiguousOutput)
-& $Qlic pack $ambiguousAvif $ambiguousOutput --threads 1 | Out-Null
-if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $ambiguousOutput)) {
+$message = @(
+  & $Qlic pack $ambiguousAvif $ambiguousOutput --threads 1 2>&1
+)
+$status = $LASTEXITCODE
+if ($status -ne 0 -and !$avifDecoderAvailable -and
+    (Test-WicAvifUnavailable $message)) {
+  Write-Host "ambiguous AVIF reached the unavailable WIC decoder"
+} elseif ($status -ne 0 -or !(Test-Path -LiteralPath $ambiguousOutput)) {
   throw "QLIC rejected an image with ambiguous losslessness metadata."
 }
 
