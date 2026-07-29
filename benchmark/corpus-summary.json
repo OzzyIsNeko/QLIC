@@ -1,0 +1,94 @@
+{
+  "TimestampUtc": "2026-07-28T20:12:36.7869869Z",
+  "CandidateFiles": 3171,
+  "IncludedImages": 3167,
+  "DuplicateNormalizedImages": 2,
+  "ExcludedFiles": 2,
+  "Pixels": 1964362720,
+  "MaximumPixelsPerImage": 16000000,
+  "Normalization": "first frame, auto-oriented, metadata stripped, 8-bit RGB or RGBA PNG",
+  "SharedDimensionLimit": 16383,
+  "EnricoSelection": "first 10 numeric screen IDs in each of 20 design topics",
+  "Categories": [
+    {
+      "Category": "natural-clic2022",
+      "Images": 30,
+      "Pixels": 86384640
+    },
+    {
+      "Category": "natural-div2k",
+      "Images": 100,
+      "Pixels": 283502880
+    },
+    {
+      "Category": "qoi-icon_512",
+      "Images": 213,
+      "Pixels": 55836672
+    },
+    {
+      "Category": "qoi-icon_64",
+      "Images": 213,
+      "Pixels": 872448
+    },
+    {
+      "Category": "qoi-photo_kodak",
+      "Images": 24,
+      "Pixels": 9437184
+    },
+    {
+      "Category": "qoi-photo_tecnick",
+      "Images": 100,
+      "Pixels": 144000000
+    },
+    {
+      "Category": "qoi-photo_wikipedia",
+      "Images": 49,
+      "Pixels": 53140448
+    },
+    {
+      "Category": "qoi-pngimg",
+      "Images": 186,
+      "Pixels": 320196732
+    },
+    {
+      "Category": "qoi-screenshot_game",
+      "Images": 618,
+      "Pixels": 391206639
+    },
+    {
+      "Category": "qoi-screenshot_web",
+      "Images": 13,
+      "Pixels": 86622127
+    },
+    {
+      "Category": "qoi-textures_photo",
+      "Images": 20,
+      "Pixels": 20971520
+    },
+    {
+      "Category": "qoi-textures_pk",
+      "Images": 1001,
+      "Pixels": 44579584
+    },
+    {
+      "Category": "qoi-textures_pk01",
+      "Images": 113,
+      "Pixels": 14680064
+    },
+    {
+      "Category": "qoi-textures_pk02",
+      "Images": 234,
+      "Pixels": 71319552
+    },
+    {
+      "Category": "qoi-textures_plants",
+      "Images": 60,
+      "Pixels": 63833030
+    },
+    {
+      "Category": "ui-enrico",
+      "Images": 193,
+      "Pixels": 317779200
+    }
+  ]
+}

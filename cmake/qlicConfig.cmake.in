@@ -1,0 +1,16 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+if(@QLIC_PACKAGE_NEEDS_WIMLIB@)
+  find_path(QLIC_WIMLIB_INCLUDE_DIR NAMES wimlib.h REQUIRED)
+  find_library(QLIC_WIMLIB_LIBRARY NAMES wim REQUIRED)
+  if(QLIC_WIMLIB_LIBRARY MATCHES "\\.a$")
+    message(FATAL_ERROR "QLIC requires the shared wimlib library")
+  endif()
+  add_library(qlic_wimlib SHARED IMPORTED)
+  set_target_properties(qlic_wimlib PROPERTIES
+    IMPORTED_LOCATION "${QLIC_WIMLIB_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${QLIC_WIMLIB_INCLUDE_DIR}")
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/qlicTargets.cmake")

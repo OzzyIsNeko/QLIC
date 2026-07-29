@@ -1,0 +1,7 @@
+#ifndef QLIC_VERSION_H
+#define QLIC_VERSION_H
+
+#define QLIC_VERSION "@PROJECT_VERSION@"
+#define QLIC_VERSION_W L"@PROJECT_VERSION@"
+
+#endif

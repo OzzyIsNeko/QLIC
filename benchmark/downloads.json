@@ -1,0 +1,37 @@
+[
+  {
+    "Name": "qoi",
+    "URL": "https://qoiformat.org/benchmark/qoi_benchmark_suite.tar",
+    "File": "qoi_benchmark_suite.tar",
+    "Bytes": 1147070464,
+    "SHA256": "00166f555ca760e23647025e46d9b046e03cd2e22869d4ecb496edc527cd0d7d"
+  },
+  {
+    "Name": "div2k",
+    "URL": "https://data.vision.ee.ethz.ch/cvl/DIV2K/DIV2K_valid_HR.zip",
+    "File": "DIV2K_valid_HR.zip",
+    "Bytes": 448993893,
+    "SHA256": "20dd31fd84d777bc1cf5d6b7654a3f569c0aec74458ae094122ad1d0489900fc"
+  },
+  {
+    "Name": "clic2022",
+    "URL": "https://storage.googleapis.com/clic_datasets/clic2022_image_valid.zip",
+    "File": "clic2022_image_valid.zip",
+    "Bytes": 126724438,
+    "SHA256": "f12d925bcf080cf941a95029156a26b8395424372ea9fe3a6d9dc122c0a67a83"
+  },
+  {
+    "Name": "enrico",
+    "URL": "https://userinterfaces.aalto.fi/enrico/resources/screenshots.zip",
+    "File": "enrico_screenshots.zip",
+    "Bytes": 115135063,
+    "SHA256": "303c3fced6012f54606c32bcc3404a68e7aa2f9b046a298a749b4ba3f68e802d"
+  },
+  {
+    "Name": "enrico-topics",
+    "URL": "https://raw.githubusercontent.com/luileito/enrico/2292f72ef2604139a2a205e291e688270f132943/design_topics.csv",
+    "File": "enrico_design_topics.csv",
+    "Bytes": 18144,
+    "SHA256": "a3c7d74e00c1f9020cdeba9620f10c65edc3c91b74d545cf5b058e902283db54"
+  }
+]

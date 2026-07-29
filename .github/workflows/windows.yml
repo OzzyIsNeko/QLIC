@@ -1,0 +1,57 @@
+name: Windows
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      # pinned revisions keep third party action changes out of release builds
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: MSVC
+        shell: pwsh
+        run: .\build.ps1 -Config Release -BuildDir build\msvc
+
+      - name: Clang
+        shell: pwsh
+        run: .\build-clang.ps1 -Config Release -BuildDir build\clang
+
+      - name: AddressSanitizer
+        shell: pwsh
+        run: .\build-clang.ps1 -Config RelWithDebInfo -BuildDir build\asan -Sanitize
+
+      - name: WebAssembly
+        shell: pwsh
+        run: .\tests\test-wasm.ps1
+
+      - name: Packages
+        shell: pwsh
+        run: .\package.ps1 -Config Release -BuildDir build\package
+
+      # do not upload an archive that disagrees with its checksum manifest
+      - name: Verify packages
+        shell: pwsh
+        run: |
+          $expected = Get-Content dist\SHA256SUMS.txt
+          if ($expected.Count -ne 5) { throw "Expected five release archives." }
+          foreach ($line in $expected) {
+            if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw "Invalid checksum line." }
+            $actual = (Get-FileHash "dist\archives\$($Matches[2])" -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $Matches[1]) { throw "Checksum mismatch: $($Matches[2])" }
+          }
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: qlic-0.5.0-demo
+          path: |
+            dist/archives/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error

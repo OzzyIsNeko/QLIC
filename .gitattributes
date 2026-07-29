@@ -1,0 +1,13 @@
+* text=auto eol=lf
+
+*.avif binary
+*.bmp binary
+*.dll binary
+*.jpg binary
+*.jxl binary
+*.png binary
+*.qlic binary
+*.tiff binary
+*.wasm binary
+*.webp binary
+*.zip binary

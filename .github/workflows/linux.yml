@@ -1,0 +1,51 @@
+name: Linux
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config libpng-dev libwebp-dev libjxl-dev libavif-dev libtiff-dev libwim-dev
+
+      - name: Release
+        run: |
+          cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/release
+          ctest --test-dir build/release --output-on-failure
+
+      - name: Installed SDK
+        run: |
+          cmake --install build/release --prefix build/install
+          cmake -S tests/package_consumer -B build/consumer -G Ninja -DCMAKE_PREFIX_PATH=$PWD/build/install
+          cmake --build build/consumer
+          build/consumer/qlic-package-consumer-static
+          LD_LIBRARY_PATH=$PWD/build/install/lib build/consumer/qlic-package-consumer-shared
+
+      - name: Minimal dependencies
+        run: |
+          cmake -S . -B build/minimal -G Ninja -DCMAKE_BUILD_TYPE=Release -DQLIC_BUILD_CLI=OFF -DQLIC_LINUX_LZMS=OFF
+          cmake --build build/minimal
+          ctest --test-dir build/minimal --output-on-failure
+
+      - name: Sanitizers
+        env:
+          CC: clang
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: |
+          cmake -S . -B build/sanitize -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQLIC_SANITIZE=ON
+          cmake --build build/sanitize
+          ctest --test-dir build/sanitize --output-on-failure

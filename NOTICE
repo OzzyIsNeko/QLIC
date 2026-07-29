@@ -1,0 +1,14 @@
+QLIC
+Copyright 2026 QLIC contributors
+
+This product includes software developed by QLIC contributors.
+
+The Windows packages include decoder components from JPEG XL, Brotli, and WebP.
+Their license texts are included with the decoder files.
+
+The LZMS decoder is a C port of the MIT licensed clean room implementation by Deployment Theory.
+Its license is in third_party/lzms/LICENSE.
+
+Linux LZMS encoding uses the separately installed wimlib shared library.
+Wimlib is copyright Eric Biggers and its library is available under LGPL 3.0 or later.
+Wimlib is not included in QLIC. See third_party/wimlib/README.md.

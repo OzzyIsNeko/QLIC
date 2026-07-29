@@ -1,0 +1,3 @@
+"Category","Source","Reason"
+"qoi-pngimg","C:\Users\ozzyi\Documents\JPEG Decompression\qlic\benchmarks_and_tools\large-matrix-2026-07-28\sources\qoi\images\pngimg\floral_frame_PNG270.png","exceeds the 16000000 pixel corpus ceiling"
+"qoi-screenshot_web","C:\Users\ozzyi\Documents\JPEG Decompression\qlic\benchmarks_and_tools\large-matrix-2026-07-28\sources\qoi\images\screenshot_web\phoboslab.org.png","outside the shared WebP dimension limit"

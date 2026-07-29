@@ -1,0 +1,5 @@
+file(READ "${INPUT}" codec OFFSET 15 LIMIT 1 HEX)
+string(TOUPPER "${codec}" codec)
+if(NOT codec STREQUAL "83")
+  message(FATAL_ERROR "Linux encoder did not select the LZMS outer codec")
+endif()
