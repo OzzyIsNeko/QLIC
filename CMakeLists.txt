@@ -100,10 +100,10 @@ if(WIN32)
       "${QLIC_WEB_DEMO_MODULE}"
       "${QLIC_WEB_DEMO_WORKER}"
     COMMAND "${QLIC_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
-      -File "${CMAKE_CURRENT_SOURCE_DIR}/build-web.ps1"
+      -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/build-web.ps1"
       -OutDir "${QLIC_WEB_DEMO_DIR}"
     DEPENDS
-      build-web.ps1
+      scripts/build-web.ps1
       web/demo.html
       web/qlic-web.js
       web/qlic-worker.js
@@ -629,5 +629,6 @@ install(FILES third_party/wimlib/README.md
   DESTINATION "${CMAKE_INSTALL_DATADIR}/qlic/third_party/wimlib")
 install(DIRECTORY docs/ DESTINATION "${CMAKE_INSTALL_DATADIR}/qlic/docs")
 if(WIN32)
-  install(FILES install-wic.ps1 uninstall-wic.ps1 DESTINATION "${CMAKE_INSTALL_DATADIR}/qlic")
+  install(FILES scripts/install-wic.ps1 scripts/uninstall-wic.ps1
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/qlic")
 endif()

@@ -22,11 +22,11 @@ jobs:
 
       - name: Clang
         shell: pwsh
-        run: .\build-clang.ps1 -Config Release -BuildDir build\clang
+        run: .\scripts\build-clang.ps1 -Config Release -BuildDir build\clang
 
       - name: AddressSanitizer
         shell: pwsh
-        run: .\build-clang.ps1 -Config RelWithDebInfo -BuildDir build\asan -Sanitize
+        run: .\scripts\build-clang.ps1 -Config RelWithDebInfo -BuildDir build\asan -Sanitize
 
       - name: WebAssembly
         shell: pwsh
@@ -34,7 +34,7 @@ jobs:
 
       - name: Packages
         shell: pwsh
-        run: .\package.ps1 -Config Release -BuildDir build\package
+        run: .\scripts\package.ps1 -Config Release -BuildDir build\package
 
       # do not upload an archive that disagrees with its checksum manifest
       - name: Verify packages

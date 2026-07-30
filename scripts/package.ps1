@@ -5,9 +5,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
-& (Join-Path $root "build-clang.ps1") -Config $Config -BuildDir $BuildDir
-& (Join-Path $root "build-web.ps1") -OutDir "web\dist"
+$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+& (Join-Path $root "scripts\build-clang.ps1") -Config $Config -BuildDir $BuildDir
+& (Join-Path $root "scripts\build-web.ps1") -OutDir "web\dist"
 
 $build = if ([System.IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $root $BuildDir }
 $qlicBinary = Get-Item (Join-Path $build "qlic.exe") -ErrorAction SilentlyContinue
@@ -67,8 +67,8 @@ Copy-Item (Join-Path $build "image-codecs") $gui -Recurse -Force
 Copy-Metadata $gui -IncludeReadme
 
 Copy-Item (Join-Path $build "qlic-wic.dll") $wic -Force
-Copy-Item (Join-Path $root "install-wic.ps1") $wic -Force
-Copy-Item (Join-Path $root "uninstall-wic.ps1") $wic -Force
+Copy-Item (Join-Path $root "scripts\install-wic.ps1") $wic -Force
+Copy-Item (Join-Path $root "scripts\uninstall-wic.ps1") $wic -Force
 Copy-Metadata $wic -IncludeReadme
 
 $sdkBin = Join-Path $sdk "bin"

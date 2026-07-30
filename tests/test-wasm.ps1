@@ -27,7 +27,7 @@ if (!$cli) {
   throw "qlic.exe was not found after build."
 }
 
-& (Join-Path $root "build-web.ps1")
+& (Join-Path $root "scripts\build-web.ps1")
 
 function B([int]$v) {
   return [byte]($v -band 255)

@@ -5,8 +5,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
-if (!$Dll) { $Dll = Join-Path $root "qlic-wic.dll" }
+$scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
+$root = Split-Path -Parent $scriptDirectory
+if (!$Dll) {
+  $Dll = Join-Path $scriptDirectory "qlic-wic.dll"
+  if (!(Test-Path $Dll)) {
+    $installed = [IO.Path]::GetFullPath(
+      (Join-Path $scriptDirectory "..\..\bin\qlic-wic.dll"))
+    if (Test-Path $installed) { $Dll = $installed }
+  }
+}
 if (!(Test-Path $Dll)) {
   $built = Get-ChildItem (Join-Path $root "build") -Filter qlic-wic.dll -File -Recurse -ErrorAction SilentlyContinue |
     Where-Object { $_.Directory.Name -eq "Release" } |
@@ -14,11 +22,11 @@ if (!(Test-Path $Dll)) {
     Select-Object -First 1
   if ($built) { $Dll = $built.FullName }
 }
-if (!(Test-Path $Dll)) { throw "qlic-wic.dll was not found. Run .\build.ps1 or pass -Dll." }
+if (!(Test-Path $Dll)) { throw "qlic-wic.dll was not found. Pass -Dll C:\path\qlic-wic.dll." }
 $Dll = (Resolve-Path $Dll).Path
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if ($Scope -eq "Machine" -and !$isAdmin) {
-  throw "Machine-wide installation requires an elevated PowerShell."
+  throw "Machine-wide removal requires an elevated PowerShell."
 }
 
 $regsvr = Join-Path $env:WINDIR "System32\regsvr32.exe"
@@ -28,8 +36,7 @@ if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProces
 
 $installScope = $Scope.ToLowerInvariant()
 $p = Start-Process -FilePath $regsvr `
-  -ArgumentList "/s /n /i:$installScope `"$Dll`"" -Wait -PassThru
-if ($p.ExitCode -ne 0) { throw "regsvr32 failed with exit code $($p.ExitCode)" }
+  -ArgumentList "/u /s /n /i:$installScope `"$Dll`"" -Wait -PassThru
+if ($p.ExitCode -ne 0) { throw "regsvr32 unregister failed with exit code $($p.ExitCode)" }
 
-Write-Host "Installed the QLIC WIC decoder for scope $Scope."
-Write-Host $Dll
+Write-Host "Removed the QLIC WIC decoder for scope $Scope."

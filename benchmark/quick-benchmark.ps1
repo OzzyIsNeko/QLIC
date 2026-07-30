@@ -45,7 +45,7 @@ function Find-Qlic {
       return (Resolve-Path -LiteralPath $candidate).Path
     }
   }
-  & (Join-Path $root "build-clang.ps1") -Config Release `
+  & (Join-Path $root "scripts\build-clang.ps1") -Config Release `
     -BuildDir "build\benchmark"
   if ($LASTEXITCODE -ne 0) {
     throw "QLIC build failed."

@@ -22,7 +22,7 @@ if ($pathKeys.Count -gt 1) {
   [Environment]::SetEnvironmentVariable(
     "Path", $pathValue, [EnvironmentVariableTarget]::Process)
 }
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $out = if ([System.IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $root $BuildDir }
 $clangCommand = Get-Command clang-cl.exe -ErrorAction SilentlyContinue
 $clang = if ($clangCommand) { $clangCommand.Source } else { Join-Path $env:ProgramFiles "LLVM\bin\clang-cl.exe" }

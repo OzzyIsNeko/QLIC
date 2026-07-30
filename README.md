@@ -26,6 +26,8 @@ benchmark contains the reproducible benchmark.
 
 third_party contains external headers and license records.
 
+scripts contains the secondary build, package, and Windows integration commands.
+
 ## Build
 
 Windows requires CMake 3.25 or newer and Visual Studio 2022 or newer with the C++ workload.
@@ -82,8 +84,8 @@ Use `qlic::qlic` for the DLL. See [docs/sdk.md](docs/sdk.md).
 ## WIC
 
 ```powershell
-.\install-wic.ps1
-.\uninstall-wic.ps1
+.\scripts\install-wic.ps1
+.\scripts\uninstall-wic.ps1
 ```
 
 Both scripts default to the current user. Pass `-Scope Machine` from an elevated PowerShell for a system-wide install.
@@ -91,7 +93,7 @@ Both scripts default to the current user. Pass `-Scope Machine` from an elevated
 ## Package
 
 ```powershell
-.\package.ps1
+.\scripts\package.ps1
 ```
 
 Release archives and SHA256 checksums are written to `dist`.
