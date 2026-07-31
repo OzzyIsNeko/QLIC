@@ -1,6 +1,6 @@
 # Reproduce the benchmark
 
-This compares QLIC 0.5.0, WebP lossless preset 6, and JPEG XL lossless effort 9 on one logical processor.
+The primary run compares QLIC 0.5.0, WebP lossless preset 6, and JPEG XL lossless effort 9 on one logical processor. The completed results also include JPEG XL efforts 6 through 8 and OxiPNG level 2 on the same corpus.
 
 [Completed results](RESULTS.md)
 
@@ -44,6 +44,10 @@ QLIC uses pack with one thread.
 WebP uses cwebp with lossless, exact, and z 6.
 
 JPEG XL uses cjxl with distance 0, effort 9, and zero worker threads.
+
+The JPEG XL effort sweep uses cjxl with distance 0, efforts 6, 7, and 8, and zero worker threads. Decode uses qlic unpack with one thread and djxl with zero worker threads. Each image gets one warmup followed by three measured runs. These timings include startup, file IO, and PNG output.
+
+The practical PNG run uses OxiPNG at level 2 with one thread, safe metadata stripping, and force enabled. Its decode measurement runs in memory to RGBA after one warmup.
 
 Every encoder is pinned to the same logical processor. Their order rotates for every image. Wall time includes startup and file IO. Peak process memory is sampled every 5 milliseconds.
 

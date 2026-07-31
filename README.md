@@ -12,6 +12,21 @@ QLIC was 9.074 percent smaller than WebP 6 and 0.694 percent larger than JPEG XL
 
 [Benchmark record](docs/benchmark.json)
 
+The same corpus was used for a separate JPEG XL effort sweep.
+
+| Codec | Settings | Total size | Encode time | Decode time |
+| --- | --- | ---: | ---: | ---: |
+| QLIC 0.5.0 | 1 thread | 1,172,509,205 bytes | 573.480 s | 314.416 s |
+| JPEG XL 0.12.0 | lossless, effort 6 | 1,214,206,451 bytes | 754.620 s | 297.093 s |
+| JPEG XL 0.12.0 | lossless, effort 7 | 1,187,851,480 bytes | 1,087.755 s | 309.095 s |
+| JPEG XL 0.12.0 | lossless, effort 8 | 1,171,971,513 bytes | 2,977.934 s | 314.935 s |
+
+QLIC was 3.434 percent smaller than JPEG XL 6, 1.292 percent smaller than JPEG XL 7, and 0.046 percent larger than JPEG XL 8. It encoded 5.193 times faster than JPEG XL 8. Decode time includes startup, file IO, and PNG output.
+
+A practical PNG run used OxiPNG 10.1.1 at level 2. QLIC produced 1,172,509,205 bytes in 586.392 seconds. OxiPNG produced 1,629,681,431 bytes in 958.226 seconds. QLIC was 28.053 percent smaller and encoded 1.634 times faster. The separate in-memory decode test took 172.676 seconds for QLIC and 11.757 seconds for PNG.
+
+[Full benchmark results](benchmark/RESULTS.md)
+
 # QLIC 0.5 Demo
 
 QLIC is a lossless still image and RGBA animation codec. The codec, C SDK, and command line tool run on Windows and Linux. The browser demo encodes still images and decodes the same QLIC files. Windows also includes a desktop demo and WIC decoder.

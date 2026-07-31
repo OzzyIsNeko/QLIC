@@ -30,6 +30,38 @@ Across equally weighted categories, QLIC was 0.715 percent larger than JPEG XL 9
 
 QLIC produced fewer bytes than JPEG XL on 1,536 of 3,167 images and fewer bytes than WebP on 2,083 images.
 
+## JPEG XL effort sweep
+
+This was a separate run on the same corpus, machine, and logical processor. Decode time is the sum of the per image average from three measured runs after one warmup.
+
+| Codec | Bytes | Encode seconds | Decode seconds |
+| --- | ---: | ---: | ---: |
+| QLIC | 1,172,509,205 | 573.480 | 314.416 |
+| JPEG XL 6 | 1,214,206,451 | 754.620 | 297.093 |
+| JPEG XL 7 | 1,187,851,480 | 1,087.755 | 309.095 |
+| JPEG XL 8 | 1,171,971,513 | 2,977.934 | 314.935 |
+
+QLIC was 3.434 percent smaller than JPEG XL 6 and encoded 1.316 times faster.
+
+QLIC was 1.292 percent smaller than JPEG XL 7 and encoded 1.897 times faster.
+
+QLIC was 0.046 percent larger than JPEG XL 8 and encoded 5.193 times faster.
+
+The QLIC command was pack with one thread. JPEG XL used distance 0, the listed effort, and no worker threads. Decode used QLIC unpack with one thread and djxl with no worker threads. Wall time includes process startup, file IO, and PNG output.
+
+## Practical PNG
+
+This run used OxiPNG 10.1.1 at level 2 on the same corpus.
+
+| Codec | Bytes | Encode seconds | In-memory decode seconds |
+| --- | ---: | ---: | ---: |
+| QLIC | 1,172,509,205 | 586.392 | 172.676 |
+| OxiPNG 2 | 1,629,681,431 | 958.226 | 11.757 |
+
+QLIC was 28.053 percent smaller and encoded 1.634 times faster. PNG decoded 14.687 times faster.
+
+OxiPNG used level 2, one thread, safe metadata stripping, and force enabled. The decode measurement produced RGBA in memory after one warmup, so it is separate from the end to end JPEG XL decode measurement.
+
 ## Color model
 
 | Color model | Images | MP | QLIC vs WebP size | QLIC vs JXL size | QLIC vs WebP speed | JXL time divided by QLIC |

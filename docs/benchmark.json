@@ -59,5 +59,54 @@
     "qlicVsJpegXlSizePercent": 0.495,
     "qlicVsWebpSpeedPercent": 4.106,
     "jpegXlTimeDividedByQlic": 10.059
+  },
+  "additionalRuns": {
+    "jpegXlEffortSweep": {
+      "timestampUtc": "2026-07-30T23:52:40.4311166Z",
+      "decodeRuns": 3,
+      "timing": "wall time including process startup, file IO, and PNG output",
+      "qlic": {
+        "settings": "pack --threads 1, unpack --threads 1",
+        "bytes": 1172509205,
+        "encodeSeconds": 573.47998,
+        "decodeSeconds": 314.416108
+      },
+      "jpegXl6": {
+        "settings": "cjxl -d 0 -e 6 --num_threads=0, djxl --num_threads=0",
+        "bytes": 1214206451,
+        "encodeSeconds": 754.620386,
+        "decodeSeconds": 297.093416
+      },
+      "jpegXl7": {
+        "settings": "cjxl -d 0 -e 7 --num_threads=0, djxl --num_threads=0",
+        "bytes": 1187851480,
+        "encodeSeconds": 1087.754869,
+        "decodeSeconds": 309.09517
+      },
+      "jpegXl8": {
+        "settings": "cjxl -d 0 -e 8 --num_threads=0, djxl --num_threads=0",
+        "bytes": 1171971513,
+        "encodeSeconds": 2977.934169,
+        "decodeSeconds": 314.935306
+      }
+    },
+    "practicalPng": {
+      "timestampUtc": "2026-07-31T02:35:10.1548106Z",
+      "decodeRuns": 3,
+      "encodeTiming": "wall time including process startup and file IO",
+      "decodeTiming": "in-memory decode to RGBA after one warmup",
+      "qlic": {
+        "settings": "pack --threads 1",
+        "bytes": 1172509205,
+        "encodeSeconds": 586.391997,
+        "decodeSeconds": 172.676188
+      },
+      "png": {
+        "settings": "oxipng -o 2 --threads 1 --strip safe --force",
+        "bytes": 1629681431,
+        "encodeSeconds": 958.226393,
+        "decodeSeconds": 11.756812
+      }
+    }
   }
 }
