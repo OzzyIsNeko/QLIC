@@ -874,20 +874,29 @@ static int wr_img(const wchar_t *path, const Image *im) {
   IWICBitmapFrameEncode *frame = NULL;
   IPropertyBag2 *bag = NULL;
 
-  size_t pixels, bytes;
+  size_t pixels;
   if (!mulok((size_t)im->width, (size_t)im->height, &pixels) ||
-      !mulok(pixels, 4, &bytes))
+      !pixels)
+    return 0;
+  const GUID *container = ct_for(path);
+  int opaque_png = IsEqualGUID(container, &GUID_ContainerFormatPng);
+  for (size_t i = 0; i < pixels && opaque_png; ++i)
+    opaque_png = im->rgba[i * 4u + 3u] == 255;
+  size_t pixel_size = opaque_png ? 3u : 4u;
+  size_t bytes;
+  if (!mulok(pixels, pixel_size, &bytes))
     return 0;
   uint8_t *bgra = (uint8_t *)xmalloc(bytes);
   if (!bgra)
     return 0;
   for (size_t i = 0; i < pixels; ++i) {
     const uint8_t *s = im->rgba + i * 4;
-    uint8_t *d = bgra + i * 4;
+    uint8_t *d = bgra + i * pixel_size;
     d[0] = s[2];
     d[1] = s[1];
     d[2] = s[0];
-    d[3] = s[3];
+    if (!opaque_png)
+      d[3] = s[3];
   }
 
   hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
@@ -909,7 +918,7 @@ static int wr_img(const wchar_t *path, const Image *im) {
     free(bgra);
     return fail_hr("WIC output file", hr);
   }
-  hr = fac->lpVtbl->CreateEncoder(fac, ct_for(path), NULL, &enc);
+  hr = fac->lpVtbl->CreateEncoder(fac, container, NULL, &enc);
   if (FAILED(hr)) {
     stream->lpVtbl->Release(stream);
     fac->lpVtbl->Release(fac);
@@ -935,14 +944,18 @@ static int wr_img(const wchar_t *path, const Image *im) {
   hr = frame->lpVtbl->Initialize(frame, bag);
   if (SUCCEEDED(hr))
     hr = frame->lpVtbl->SetSize(frame, im->width, im->height);
-  WICPixelFormatGUID pf = GUID_WICPixelFormat32bppBGRA;
+  WICPixelFormatGUID pf = opaque_png ? GUID_WICPixelFormat24bppBGR
+                                    : GUID_WICPixelFormat32bppBGRA;
   if (SUCCEEDED(hr))
     hr = frame->lpVtbl->SetPixelFormat(frame, &pf);
-  if (SUCCEEDED(hr) && !IsEqualGUID(&pf, &GUID_WICPixelFormat32bppBGRA)) {
+  const GUID *expected = opaque_png ? &GUID_WICPixelFormat24bppBGR
+                                    : &GUID_WICPixelFormat32bppBGRA;
+  if (SUCCEEDED(hr) && !IsEqualGUID(&pf, expected)) {
     hr = E_FAIL;
   }
   if (SUCCEEDED(hr))
-    hr = frame->lpVtbl->WritePixels(frame, im->height, im->width * 4,
+    hr = frame->lpVtbl->WritePixels(frame, im->height,
+                                    im->width * (UINT)pixel_size,
                                     (UINT)bytes, bgra);
   if (SUCCEEDED(hr))
     hr = frame->lpVtbl->Commit(frame);

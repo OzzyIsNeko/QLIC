@@ -315,18 +315,113 @@ static QLIC_FORCEINLINE void prob_update(Prob *p, int bit, int adapt) {
     if (bit) *p -= *p >> adapt;
     else *p += (PROB_ONE - *p) >> adapt;
 }
-static QLIC_FORCEINLINE void enc_bit_rate(Enc *QLIC_RESTRICT e,
-                                          Prob *QLIC_RESTRICT p, int bit,
-                                          int adapt) {
-    uint32_t prob = *p;
+
+_Static_assert(PROB_BITS == 12,
+               "packed probability updates require 12 bit probabilities");
+
+static QLIC_FORCEINLINE void prob_update_triplet(
+    Prob *a, int adapt_a, Prob *b, Prob *c, int adapt_bc, int bit) {
+    if (bit) {
+        *a -= *a >> adapt_a;
+        *b -= *b >> adapt_bc;
+        *c -= *c >> adapt_bc;
+    } else {
+        *a += (PROB_ONE - *a) >> adapt_a;
+        *b += (PROB_ONE - *b) >> adapt_bc;
+        *c += (PROB_ONE - *c) >> adapt_bc;
+    }
+}
+
+static QLIC_FORCEINLINE void prob_update_four(
+    Prob *a, int adapt_a, Prob *b, int adapt_b, Prob *c, Prob *d,
+    int adapt_cd, int bit) {
+    if (bit) {
+        *a -= *a >> adapt_a;
+        *b -= *b >> adapt_b;
+        *c -= *c >> adapt_cd;
+        *d -= *d >> adapt_cd;
+    } else {
+        *a += (PROB_ONE - *a) >> adapt_a;
+        *b += (PROB_ONE - *b) >> adapt_b;
+        *c += (PROB_ONE - *c) >> adapt_cd;
+        *d += (PROB_ONE - *d) >> adapt_cd;
+    }
+}
+
+static QLIC_FORCEINLINE void prob_update_four_branchless(
+    Prob *a, int adapt_a, Prob *b, int adapt_b, Prob *c, Prob *d,
+    int adapt_cd, int bit) {
+    uint32_t mask = 0u - (uint32_t)bit;
+#define UPDATE_ONE(P, A) do { \
+        uint32_t value__ = *(P); \
+        uint32_t increase__ = (PROB_ONE - value__) >> (A); \
+        uint32_t decrease__ = value__ >> (A); \
+        *(P) = (Prob)(value__ + \
+            ((increase__ & ~mask) - (decrease__ & mask))); \
+    } while (0)
+    UPDATE_ONE(a, adapt_a);
+    UPDATE_ONE(b, adapt_b);
+    UPDATE_ONE(c, adapt_cd);
+    UPDATE_ONE(d, adapt_cd);
+#undef UPDATE_ONE
+}
+
+static QLIC_FORCEINLINE void prob_update_five(
+    Prob *a, int adapt_a, Prob *b, int adapt_b, Prob *c, int adapt_c,
+    Prob *d, Prob *e, int adapt_de, int bit) {
+    uint32_t mask = 0u - (uint32_t)bit;
+#define UPDATE_ONE(P, A) do { \
+        uint32_t value__ = *(P); \
+        uint32_t increase__ = (PROB_ONE - value__) >> (A); \
+        uint32_t decrease__ = value__ >> (A); \
+        *(P) = (Prob)(value__ + \
+            ((increase__ & ~mask) - (decrease__ & mask))); \
+    } while (0)
+    UPDATE_ONE(a, adapt_a);
+    UPDATE_ONE(b, adapt_b);
+    UPDATE_ONE(c, adapt_c);
+    UPDATE_ONE(d, adapt_de);
+    UPDATE_ONE(e, adapt_de);
+#undef UPDATE_ONE
+}
+
+/* probabilities use 12 bits, so one masked shift can update four lanes */
+static QLIC_FORCEINLINE void prob_update_quad(Prob *a, Prob *b, Prob *c,
+                                               Prob *d, int bit, int adapt) {
+    static const uint64_t shift_mask[9] = {
+        0, 0,
+        UINT64_C(0x07ff07ff07ff07ff),
+        UINT64_C(0x03ff03ff03ff03ff),
+        UINT64_C(0x01ff01ff01ff01ff),
+        UINT64_C(0x00ff00ff00ff00ff),
+        UINT64_C(0x007f007f007f007f),
+        UINT64_C(0x003f003f003f003f),
+        UINT64_C(0x001f001f001f001f)
+    };
+    uint64_t packed = (uint64_t)*a | ((uint64_t)*b << 16) |
+                      ((uint64_t)*c << 32) | ((uint64_t)*d << 48);
+    uint64_t delta;
+    if (bit) {
+        delta = (packed >> adapt) & shift_mask[adapt];
+        packed -= delta;
+    } else {
+        delta = ((UINT64_C(0x1000100010001000) - packed) >> adapt) &
+                shift_mask[adapt];
+        packed += delta;
+    }
+    *a = (Prob)packed;
+    *b = (Prob)(packed >> 16);
+    *c = (Prob)(packed >> 32);
+    *d = (Prob)(packed >> 48);
+}
+
+static QLIC_FORCEINLINE void enc_bit_value(Enc *QLIC_RESTRICT e,
+                                           uint32_t prob, int bit) {
     uint32_t bound = (e->range >> PROB_BITS) * prob;
     uint32_t mask = 0u - (uint32_t)bit;
     uint32_t low_range = e->range - bound;
-    uint32_t up = prob + ((PROB_ONE - prob) >> adapt);
-    uint32_t down = prob - (prob >> adapt);
     e->low += (uint64_t)(bound & mask);
     e->range = (bound & ~mask) | (low_range & mask);
-    *p = (Prob)((up & ~mask) | (down & mask));
     if (e->range < RC_TOP) {
         e->range <<= 8;
         enc_shift(e);
@@ -335,6 +430,16 @@ static QLIC_FORCEINLINE void enc_bit_rate(Enc *QLIC_RESTRICT e,
             enc_shift(e);
         }
     }
+}
+static QLIC_FORCEINLINE void enc_bit_rate(Enc *QLIC_RESTRICT e,
+                                          Prob *QLIC_RESTRICT p, int bit,
+                                          int adapt) {
+    uint32_t prob = *p;
+    enc_bit_value(e, prob, bit);
+    uint32_t mask = 0u - (uint32_t)bit;
+    uint32_t up = prob + ((PROB_ONE - prob) >> adapt);
+    uint32_t down = prob - (prob >> adapt);
+    *p = (Prob)((up & ~mask) | (down & mask));
 }
 static QLIC_FORCEINLINE void enc_bit(Enc *QLIC_RESTRICT e,
                                      Prob *QLIC_RESTRICT p, int bit) {
@@ -356,14 +461,17 @@ static QLIC_FORCEINLINE int dec_bit_rate(Dec *QLIC_RESTRICT d,
                                          Prob *QLIC_RESTRICT p, int adapt) {
     uint32_t prob = *p;
     uint32_t bound = (d->range >> PROB_BITS) * prob;
-    uint32_t bit = d->code >= bound;
-    uint32_t mask = 0u - bit;
-    uint32_t low_range = d->range - bound;
-    uint32_t up = prob + ((PROB_ONE - prob) >> adapt);
-    uint32_t down = prob - (prob >> adapt);
-    d->code -= bound & mask;
-    d->range = (bound & ~mask) | (low_range & mask);
-    *p = (Prob)((up & ~mask) | (down & mask));
+    int bit;
+    if (d->code < bound) {
+        d->range = bound;
+        *p = (Prob)(prob + ((PROB_ONE - prob) >> adapt));
+        bit = 0;
+    } else {
+        d->code -= bound;
+        d->range -= bound;
+        *p = (Prob)(prob - (prob >> adapt));
+        bit = 1;
+    }
     if (d->range < RC_TOP) {
         d->range <<= 8;
         d->code = (d->code << 8) | dec_getbyte(d);
@@ -382,75 +490,37 @@ static QLIC_FORCEINLINE int dec_bit(Dec *QLIC_RESTRICT d,
 static QLIC_FORCEINLINE void enc_bit_mix(Enc *e, Prob *child, Prob *parent,
                                          int bit) {
     Prob mixed = (Prob)((5u * *child + 3u * *parent + 4u) >> 3);
-    enc_bit(e, &mixed, bit);
+    enc_bit_value(e, mixed, bit);
     prob_update(child, bit, e->adapt);
     prob_update(parent, bit, e->adapt);
-}
-
-static QLIC_FORCEINLINE int dec_bit_mix(Dec *d, Prob *child, Prob *parent) {
-    Prob mixed = (Prob)((5u * *child + 3u * *parent + 4u) >> 3);
-    int bit = dec_bit(d, &mixed);
-    prob_update(child, bit, d->adapt);
-    prob_update(parent, bit, d->adapt);
-    return bit;
 }
 
 static QLIC_FORCEINLINE void enc_bit_coarse(Enc *e, Prob *child, Prob *parent,
                                             int bit) {
     Prob mixed = (Prob)((*child + *parent + 1u) >> 1);
-    enc_bit(e, &mixed, bit);
+    enc_bit_value(e, mixed, bit);
     prob_update(child, bit, e->adapt);
     prob_update(parent, bit, e->adapt);
-}
-
-static QLIC_FORCEINLINE int dec_bit_coarse(Dec *d, Prob *child, Prob *parent) {
-    Prob mixed = (Prob)((*child + *parent + 1u) >> 1);
-    int bit = dec_bit(d, &mixed);
-    prob_update(child, bit, d->adapt);
-    prob_update(parent, bit, d->adapt);
-    return bit;
 }
 
 static QLIC_FORCEINLINE void enc_bit_mix3(Enc *e, Prob *child, Prob *parent,
                                           Prob *coarse, int bit) {
     Prob parent_mix = (Prob)((*parent + *coarse + 1u) >> 1);
     Prob mixed = (Prob)((5u * *child + 3u * parent_mix + 4u) >> 3);
-    enc_bit(e, &mixed, bit);
+    enc_bit_value(e, mixed, bit);
     prob_update(child, bit, e->adapt);
     prob_update(parent, bit, e->adapt);
     prob_update(coarse, bit, e->adapt);
-}
-
-static QLIC_FORCEINLINE int dec_bit_mix3(Dec *d, Prob *child, Prob *parent,
-                                         Prob *coarse) {
-    Prob parent_mix = (Prob)((*parent + *coarse + 1u) >> 1);
-    Prob mixed = (Prob)((5u * *child + 3u * parent_mix + 4u) >> 3);
-    int bit = dec_bit(d, &mixed);
-    prob_update(child, bit, d->adapt);
-    prob_update(parent, bit, d->adapt);
-    prob_update(coarse, bit, d->adapt);
-    return bit;
 }
 
 static QLIC_FORCEINLINE void enc_bit_root(Enc *e, Prob *fine, Prob *coarse,
                                           Prob *root, int bit, int slow) {
     Prob coarse_mix = (Prob)((*coarse + *root + 1u) >> 1);
     Prob mixed = (Prob)((*fine + coarse_mix + 1u) >> 1);
-    enc_bit(e, &mixed, bit);
+    enc_bit_value(e, mixed, bit);
     prob_update(fine, bit, e->adapt);
     prob_update(coarse, bit, e->adapt + slow);
     prob_update(root, bit, e->adapt + slow);
-}
-
-static QLIC_FORCEINLINE int dec_bit_root(Dec *d, Prob *fine, Prob *coarse,
-                                         Prob *root, int slow) {
-    Prob coarse_mix = (Prob)((*coarse + *root + 1u) >> 1);
-    Prob mixed = (Prob)((*fine + coarse_mix + 1u) >> 1);
-    int bit = dec_bit(d, &mixed);
-    prob_update(fine, bit, d->adapt);
-    prob_update(coarse, bit, d->adapt + slow);
-    prob_update(root, bit, d->adapt + slow);
-    return bit;
 }
 
 static QLIC_FORCEINLINE void enc_bit_mix4_custom(
@@ -460,26 +530,11 @@ static QLIC_FORCEINLINE void enc_bit_mix4_custom(
     Prob parent_mix = (Prob)((*fine + coarse_mix + 1u) >> 1);
     Prob mixed = (Prob)(((unsigned)weight * *child +
                          (unsigned)(8 - weight) * parent_mix + 4u) >> 3);
-    enc_bit(e, &mixed, bit);
+    enc_bit_value(e, mixed, bit);
     prob_update(child, bit, e->adapt - child_rate);
     prob_update(fine, bit, e->adapt);
     prob_update(coarse, bit, e->adapt + slow);
     prob_update(root, bit, e->adapt + slow);
-}
-
-static QLIC_FORCEINLINE int dec_bit_mix4_custom(
-    Dec *d, Prob *child, Prob *fine, Prob *coarse, Prob *root, int slow,
-    int weight, int child_rate) {
-    Prob coarse_mix = (Prob)((*coarse + *root + 1u) >> 1);
-    Prob parent_mix = (Prob)((*fine + coarse_mix + 1u) >> 1);
-    Prob mixed = (Prob)(((unsigned)weight * *child +
-                         (unsigned)(8 - weight) * parent_mix + 4u) >> 3);
-    int bit = dec_bit(d, &mixed);
-    prob_update(child, bit, d->adapt - child_rate);
-    prob_update(fine, bit, d->adapt);
-    prob_update(coarse, bit, d->adapt + slow);
-    prob_update(root, bit, d->adapt + slow);
-    return bit;
 }
 
 static QLIC_FORCEINLINE void enc_bit_mix4(
@@ -489,13 +544,6 @@ static QLIC_FORCEINLINE void enc_bit_mix4(
                         fast_child ? 6 : 5, fast_child);
 }
 
-static QLIC_FORCEINLINE int dec_bit_mix4(Dec *d, Prob *child, Prob *fine,
-                                         Prob *coarse, Prob *root, int slow,
-                                         int fast_child) {
-    return dec_bit_mix4_custom(d, child, fine, coarse, root, slow,
-                               fast_child ? 6 : 5, fast_child);
-}
-
 static QLIC_FORCEINLINE void enc_bit_mix4_weight(
     Enc *e, Prob *child, Prob *fine, Prob *coarse, Prob *root, int bit,
     int slow, int weight) {
@@ -503,26 +551,11 @@ static QLIC_FORCEINLINE void enc_bit_mix4_weight(
     Prob parent_mix = (Prob)((*fine + coarse_mix + 1u) >> 1);
     Prob mixed = (Prob)(((unsigned)weight * *child +
                          (unsigned)(8 - weight) * parent_mix + 4u) >> 3);
-    enc_bit(e, &mixed, bit);
+    enc_bit_value(e, mixed, bit);
     prob_update(child, bit, e->adapt + 1);
     prob_update(fine, bit, e->adapt);
     prob_update(coarse, bit, e->adapt + slow);
     prob_update(root, bit, e->adapt + slow);
-}
-
-static QLIC_FORCEINLINE int dec_bit_mix4_weight(
-    Dec *d, Prob *child, Prob *fine, Prob *coarse, Prob *root, int slow,
-    int weight) {
-    Prob coarse_mix = (Prob)((*coarse + *root + 1u) >> 1);
-    Prob parent_mix = (Prob)((*fine + coarse_mix + 1u) >> 1);
-    Prob mixed = (Prob)(((unsigned)weight * *child +
-                         (unsigned)(8 - weight) * parent_mix + 4u) >> 3);
-    int bit = dec_bit(d, &mixed);
-    prob_update(child, bit, d->adapt + 1);
-    prob_update(fine, bit, d->adapt);
-    prob_update(coarse, bit, d->adapt + slow);
-    prob_update(root, bit, d->adapt + slow);
-    return bit;
 }
 
 static QLIC_FORCEINLINE void enc_bit_mix5_sign(
@@ -530,26 +563,12 @@ static QLIC_FORCEINLINE void enc_bit_mix5_sign(
     int bit, int slow, int weight, int child_rate, int exact_rate) {
     Prob mixed = (Prob)(((unsigned)weight * *child +
                          (unsigned)(16 - weight) * *exact + 8u) >> 4);
-    enc_bit(e, &mixed, bit);
+    enc_bit_value(e, mixed, bit);
     prob_update(child, bit, e->adapt - child_rate);
     prob_update(exact, bit, e->adapt - exact_rate);
     prob_update(fine, bit, e->adapt);
     prob_update(coarse, bit, e->adapt + slow);
     prob_update(root, bit, e->adapt + slow);
-}
-
-static QLIC_FORCEINLINE int dec_bit_mix5_sign(
-    Dec *d, Prob *child, Prob *exact, Prob *fine, Prob *coarse, Prob *root,
-    int slow, int weight, int child_rate, int exact_rate) {
-    Prob mixed = (Prob)(((unsigned)weight * *child +
-                         (unsigned)(16 - weight) * *exact + 8u) >> 4);
-    int bit = dec_bit(d, &mixed);
-    prob_update(child, bit, d->adapt - child_rate);
-    prob_update(exact, bit, d->adapt - exact_rate);
-    prob_update(fine, bit, d->adapt);
-    prob_update(coarse, bit, d->adapt + slow);
-    prob_update(root, bit, d->adapt + slow);
-    return bit;
 }
 
 #define NACT  12
@@ -573,6 +592,22 @@ static const int8_t mode53_zero_rate = 0;
 static const uint8_t mode53_magnitude_weight = 4;
 static const int8_t mode53_magnitude_rate = -1;
 static const int8_t mode53_root_rate[3] = {-1, 0, 1};
+static const uint8_t decode_error_context[16][2] = {
+    {0, 0}, {2, 1}, {2, 1}, {4, 3},
+    {4, 3}, {5, 5}, {5, 5}, {5, 5},
+    {5, 5}, {5, 5}, {5, 5}, {5, 5},
+    {5, 5}, {5, 5}, {5, 5}, {5, 5}
+};
+static const uint8_t decode_predictor_context[NPREDX] = {
+    0,
+    NCTX, NCTX, NCTX, NCTX,
+    NCTX * 2, NCTX * 2, NCTX * 2, NCTX * 2,
+    NCTX * 2, NCTX * 2,
+    NCTX * 3, NCTX * 3, NCTX * 3, NCTX * 3, NCTX * 3,
+    NCTX * 3, NCTX * 3, NCTX * 3, NCTX * 3, NCTX * 3, NCTX * 3,
+    NCTX * 3, NCTX * 3, NCTX * 3, NCTX * 3, NCTX * 3, NCTX * 3,
+    NCTX * 3, NCTX * 3, NCTX * 3, NCTX * 3
+};
 
 typedef struct {
     Prob unary[XCTX][MAXK + 1];
@@ -636,11 +671,20 @@ static uint8_t predictor_nbits_lut[1024];
 static uint8_t predictor_cost_lut[257];
 static uint8_t predictor_xzr_cost_lut[512];
 static uint8_t activity_ctx_lut[1025];
+static uint8_t fast55_error_context_lut[32 * 32];
 static uint8_t predictor_diff_cost8[511];
 static uint8_t predictor_diff_xzr8[511];
 static uint8_t predictor_diff_cost9[1023];
 static uint8_t predictor_diff_xzr9[1023];
 static uint32_t weighted_division[64];
+
+typedef struct {
+    int16_t error;
+    uint8_t error_state;
+    uint8_t channel_state;
+} Fast55Residual;
+
+static Fast55Residual fast55_residual_lut[512];
 #if defined(_MSC_VER) && defined(_M_X64)
 static uint32_t predictor_diff_cost8_avx2[511];
 static uint32_t predictor_diff_xzr8_avx2[511];
@@ -668,6 +712,24 @@ static void model_init_bases(void) {
     for (unsigned i = 0; i <= 1024u; ++i)
         activity_ctx_lut[i] =
             (uint8_t)(i <= 2u ? i : predictor_nbits_lut[i - 1u] + 1u);
+    for (unsigned left = 0; left < 32u; ++left)
+        for (unsigned up = 0; up < 32u; ++up) {
+            unsigned state = (up & 15u) > (left & 15u) ? up : left;
+            fast55_error_context_lut[(left << 5) | up] =
+                decode_error_context[state & 15u][state >> 4];
+        }
+    for (unsigned symbol = 0; symbol < 512u; ++symbol) {
+        int error = symbol & 1u ? -(int)((symbol + 1u) >> 1) :
+                                  (int)(symbol >> 1);
+        unsigned magnitude = (unsigned)(error < 0 ? -error : error);
+        Fast55Residual *residual = fast55_residual_lut + symbol;
+        residual->error = (int16_t)error;
+        residual->error_state = (uint8_t)(
+            predictor_nbits_lut[magnitude] | (error > 0 ? 16 : 0));
+        residual->channel_state = symbol ?
+            (uint8_t)((symbol & 1u ? 2u : 1u) +
+                      (magnitude > 4u ? 2u : 0u)) : 0;
+    }
     for (int d = -255; d <= 255; ++d) {
         int e = ((d + 128) & 255) - 128;
         unsigned v = (unsigned)(e < 0 ? -e : e);
@@ -868,24 +930,25 @@ static void weighted_predictor_update(WeightedPredictor *state, uint32_t x,
     }
 }
 
-static int qctx(int act) {
+static QLIC_FORCEINLINE int qctx(int act) {
     return (unsigned)act <= 1024u ? activity_ctx_lut[act] : 11;
 }
 
-static int local_zero_ctx(int left, int up, int left_sign, int up_sign) {
+static QLIC_FORCEINLINE int local_zero_ctx(int left, int up, int left_sign,
+                                            int up_sign) {
     if (!left) return up ? 2 : 0;
     if (!up) return 1;
     return left_sign == up_sign ? 3 : 4;
 }
-static int channel_state(int act, int e, int k) {
+static QLIC_FORCEINLINE int channel_state(int act, int e, int k) {
     int r = e > 0 ? (k <= 2 ? 1 : 2) : (e < 0 ? (k <= 2 ? 3 : 4) : 0);
     return (act > 0 ? 5 : 0) + r;
 }
-static int channel_zero_state(int state) {
+static QLIC_FORCEINLINE int channel_zero_state(int state) {
     static const uint8_t lut[10] = {0, 1, 1, 2, 2, 3, 4, 4, 5, 5};
     return lut[state];
 }
-static int channel_magnitude_state(int state) {
+static QLIC_FORCEINLINE int channel_magnitude_state(int state) {
     static const uint8_t lut[10] = {0, 1, 2, 1, 2, 0, 1, 2, 1, 2};
     return lut[state];
 }
@@ -901,21 +964,23 @@ static void channel_pair_tables(uint8_t zero[256], uint8_t magnitude[256]) {
         }
     }
 }
-static int ebkt(int k) { return k == 0 ? 0 : (k <= 2 ? 1 : 2); }
-static int ectx(int act, int prevk, int prevs, int sc) {
+static QLIC_FORCEINLINE int ebkt(int k) {
+    return k == 0 ? 0 : (k <= 2 ? 1 : 2);
+}
+static QLIC_FORCEINLINE int ectx(int act, int prevk, int prevs, int sc) {
     if (!sc) return act * NERR0 + ebkt(prevk);
     if (prevk == 0) return act * NERR;
     if (prevk <= 2) return act * NERR + (prevs > 0 ? 1 : 2);
     if (prevk <= 4) return act * NERR + (prevs > 0 ? 3 : 4);
     return act * NERR + 5;
 }
-static int pctx(int pid) {
+static QLIC_FORCEINLINE int pctx(int pid) {
     if (pid == 0) return 0;
     if (pid <= 4) return NCTX;
     if (pid < NPREDX0) return NCTX * 2;
     return NCTX * 3;
 }
-static int pctx2(int pid) {
+static QLIC_FORCEINLINE int pctx2(int pid) {
     if (pid == 0) return 0;
     if (pid <= 4) return NCTX;
     if (pid <= 10) return NCTX * 2;
@@ -935,7 +1000,7 @@ static int zmode_sc(int mode) {
 }
 static int zmode_valid(int mode) {
     return (mode >= 0 && mode <= 4) ||
-           (mode >= 8 && mode <= 27) || (mode >= 29 && mode <= 54);
+           (mode >= 8 && mode <= 27) || (mode >= 29 && mode <= 56);
 }
 static int zmode_pos(int mode, int plane) {
     if (mode == 27 || (mode >= 29 && mode <= 41)) return plane == 1;
@@ -952,7 +1017,8 @@ enum {
     PLANE_RULE,
     PLANE_EVENT,
     PLANE_PATTERN,
-    PLANE_CONTEXT
+    PLANE_CONTEXT,
+    PLANE_SPARSE
 };
 
 static int plane_method_for(int mode) {
@@ -960,6 +1026,7 @@ static int plane_method_for(int mode) {
     if (mode == 38) return PLANE_RULE;
     if (mode == 39) return PLANE_EVENT;
     if (mode == 40) return PLANE_PATTERN;
+    if (mode == 56) return PLANE_SPARSE;
     if (mode == 37 || mode == 41 || (mode >= 43 && mode <= 54))
         return PLANE_CONTEXT;
     if (mode == 24 || mode == 26 || mode == 27 ||
@@ -1205,10 +1272,12 @@ static QLIC_FORCEINLINE void predictor_costs37(
 #undef ADD_XZR
 }
 
-static int sign_hint(int W, int N, int NW, int NE, int WW, int NN, int pr, int maxv) {
+static int sign_hint(int W, int N, int NW, int NE, int WW, int NN, int pr,
+                     int maxv) {
     int ref = gapp(W, N, NW, NE, WW, NN, maxv);
     return (ref > pr) - (ref < pr);
 }
+
 static Prob *sign_prob(Model *m, int ctx, int hint, int hc, int hd) {
     if (!hc || !hint) return &m->nz[ctx];
     return hd ? &m->sg[ctx][hint < 0] : &m->zr[ctx];
@@ -2011,6 +2080,12 @@ static QLIC_FORCEINLINE int encode_plane37_impl(
                 pr = Wv;
             else if (pid == 1)
                 pr = paethp(Wv, Nv, NWv);
+            else if (pid == 3)
+                pr = Nv;
+            else if (pid == 4)
+                pr = (Wv + Nv + 1) >> 1;
+            else if (pid == 5)
+                pr = clampi(Nv + Wv - NWv, 0, maxv);
             else pr = predicta(pid, Wv, Nv, NWv, NEv, WWv, NNv, maxv);
             int act = iabs(Wv - NWv) + iabs(NWv - Nv) + iabs(Nv - NEv) +
                       ((iabs(Wv - WWv) + iabs(Nv - NNv)) >> 1);
@@ -2048,7 +2123,10 @@ static QLIC_FORCEINLINE int encode_plane37_impl(
                 }
             }
             Prob *zero_parent = &m->unary[ctx][0];
-            Prob *zero = cross_states ? &cross[(size_t)zero_state * context_stride + (size_t)ctx] : zero_parent;
+            Prob *zero = cross_states
+                             ? &cross[(size_t)zero_state * context_stride +
+                                      (size_t)ctx]
+                             : zero_parent;
             if (!*zero) *zero = *zero_parent;
             if (root_ctx) {
                 Prob *cp = &coarse.zero[base_ctx];
@@ -3028,29 +3106,187 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
         free(models);
         return STREAM_E_ALLOC;
     }
+    const uint8_t *bit_cursor = dec->ptr;
+    const uint8_t *bit_end = dec->end;
+    uint32_t bit_range = dec->range;
+    uint32_t bit_code = dec->code;
+    int bit_truncated = dec->truncated;
+    int bit_adapt = dec->adapt;
+#define DEC37_VALUE(V, B) do { \
+        uint32_t probability__ = (V); \
+        uint32_t bound__ = (bit_range >> PROB_BITS) * probability__; \
+        if (bit_code < bound__) { \
+            bit_range = bound__; \
+            (B) = 0; \
+        } else { \
+            bit_code -= bound__; \
+            bit_range -= bound__; \
+            (B) = 1; \
+        } \
+        if (bit_range < RC_TOP) { \
+            bit_range <<= 8; \
+            if (bit_cursor < bit_end) \
+                bit_code = (bit_code << 8) | *bit_cursor++; \
+            else { \
+                bit_code <<= 8; \
+                bit_truncated = 1; \
+            } \
+            if (bit_range < RC_TOP) { \
+                bit_range <<= 8; \
+                if (bit_cursor < bit_end) \
+                    bit_code = (bit_code << 8) | *bit_cursor++; \
+                else { \
+                    bit_code <<= 8; \
+                    bit_truncated = 1; \
+                } \
+            } \
+        } \
+    } while (0)
+#define DEC37_BIT(P, B) do { \
+        Prob *prob__ = (P); \
+        DEC37_VALUE(*prob__, B); \
+        prob_update(prob__, B, bit_adapt); \
+    } while (0)
+#define DEC37_ROOT(F, C, R, S, B) do { \
+        Prob *fine__ = (F); \
+        Prob *coarse__ = (C); \
+        Prob *root__ = (R); \
+        int slow__ = (S); \
+        Prob coarse_mix__ = (Prob)((*coarse__ + *root__ + 1u) >> 1); \
+        Prob mixed__ = (Prob)((*fine__ + coarse_mix__ + 1u) >> 1); \
+        DEC37_VALUE(mixed__, B); \
+        prob_update_triplet(fine__, bit_adapt, coarse__, root__, \
+                            bit_adapt + slow__, B); \
+    } while (0)
+#define DEC37_COARSE(F, C, B) do { \
+        Prob *fine__ = (F); \
+        Prob *coarse__ = (C); \
+        Prob mixed__ = (Prob)((*fine__ + *coarse__ + 1u) >> 1); \
+        DEC37_VALUE(mixed__, B); \
+        prob_update(fine__, B, bit_adapt); \
+        prob_update(coarse__, B, bit_adapt); \
+    } while (0)
+#define DEC37_MIX(CH, P, B) do { \
+        Prob *child__ = (CH); \
+        Prob *parent__ = (P); \
+        Prob mixed__ = (Prob)((5u * *child__ + 3u * *parent__ + 4u) >> 3); \
+        DEC37_VALUE(mixed__, B); \
+        prob_update(child__, B, bit_adapt); \
+        prob_update(parent__, B, bit_adapt); \
+    } while (0)
+#define DEC37_MIX3(CH, P, C, B) do { \
+        Prob *child__ = (CH); \
+        Prob *parent__ = (P); \
+        Prob *coarse__ = (C); \
+        Prob parent_mix__ = (Prob)((*parent__ + *coarse__ + 1u) >> 1); \
+        Prob mixed__ = (Prob)((5u * *child__ + 3u * parent_mix__ + 4u) >> 3); \
+        DEC37_VALUE(mixed__, B); \
+        prob_update(child__, B, bit_adapt); \
+        prob_update(parent__, B, bit_adapt); \
+        prob_update(coarse__, B, bit_adapt); \
+    } while (0)
+#define DEC37_MIX4_CUSTOM(CH, F, C, R, S, W, CR, B) do { \
+        Prob *child__ = (CH); \
+        Prob *fine__ = (F); \
+        Prob *coarse__ = (C); \
+        Prob *root__ = (R); \
+        int slow__ = (S); \
+        int weight__ = (W); \
+        int child_rate__ = (CR); \
+        Prob coarse_mix__ = (Prob)((*coarse__ + *root__ + 1u) >> 1); \
+        Prob parent_mix__ = (Prob)((*fine__ + coarse_mix__ + 1u) >> 1); \
+        Prob mixed__ = (Prob)(((unsigned)weight__ * *child__ + \
+                               (unsigned)(8 - weight__) * parent_mix__ + 4u) >> 3); \
+        DEC37_VALUE(mixed__, B); \
+        if (!child_rate__ && !slow__) \
+            prob_update_quad(child__, fine__, coarse__, root__, B, bit_adapt); \
+        else \
+            prob_update_four(child__, bit_adapt - child_rate__, fine__, \
+                             bit_adapt, coarse__, root__, \
+                             bit_adapt + slow__, B); \
+    } while (0)
+#define DEC37_MIX4(CH, F, C, R, S, FC, B) \
+    DEC37_MIX4_CUSTOM(CH, F, C, R, S, (FC) ? 6 : 5, FC, B)
+#define DEC37_MIX4_SIGN_CUSTOM(CH, F, C, R, S, W, CR, B) do { \
+        Prob *child__ = (CH); \
+        Prob *fine__ = (F); \
+        Prob *coarse__ = (C); \
+        Prob *root__ = (R); \
+        int slow__ = (S); \
+        int weight__ = (W); \
+        int child_rate__ = (CR); \
+        Prob coarse_mix__ = (Prob)((*coarse__ + *root__ + 1u) >> 1); \
+        Prob parent_mix__ = (Prob)((*fine__ + coarse_mix__ + 1u) >> 1); \
+        Prob mixed__ = (Prob)(((unsigned)weight__ * *child__ + \
+                               (unsigned)(8 - weight__) * parent_mix__ + 4u) >> 3); \
+        DEC37_VALUE(mixed__, B); \
+        prob_update_four_branchless( \
+            child__, bit_adapt - child_rate__, fine__, bit_adapt, coarse__, \
+            root__, bit_adapt + slow__, B); \
+    } while (0)
+#define DEC37_MIX4_WEIGHT(CH, F, C, R, S, W, B) do { \
+        Prob *child__ = (CH); \
+        Prob *fine__ = (F); \
+        Prob *coarse__ = (C); \
+        Prob *root__ = (R); \
+        int slow__ = (S); \
+        int weight__ = (W); \
+        Prob coarse_mix__ = (Prob)((*coarse__ + *root__ + 1u) >> 1); \
+        Prob parent_mix__ = (Prob)((*fine__ + coarse_mix__ + 1u) >> 1); \
+        Prob mixed__ = (Prob)(((unsigned)weight__ * *child__ + \
+                               (unsigned)(8 - weight__) * parent_mix__ + 4u) >> 3); \
+        DEC37_VALUE(mixed__, B); \
+        prob_update_four_branchless( \
+            child__, bit_adapt + 1, fine__, bit_adapt, coarse__, root__, \
+            bit_adapt + slow__, B); \
+    } while (0)
+#define DEC37_MIX5_SIGN(CH, E, F, C, R, S, W, CR, ER, B) do { \
+        Prob *child__ = (CH); \
+        Prob *exact__ = (E); \
+        Prob *fine__ = (F); \
+        Prob *coarse__ = (C); \
+        Prob *root__ = (R); \
+        int weight__ = (W); \
+        Prob mixed__ = (Prob)(((unsigned)weight__ * *child__ + \
+                               (unsigned)(16 - weight__) * *exact__ + 8u) >> 4); \
+        DEC37_VALUE(mixed__, B); \
+        prob_update_five(child__, bit_adapt - (CR), exact__, \
+                         bit_adapt - (ER), fine__, bit_adapt, coarse__, \
+                         root__, bit_adapt + (S), B); \
+    } while (0)
     for (uint32_t y = 0; y < h; y++) {
-        uint16_t *row = pl + (size_t)y * w;
+        size_t row_offset = (size_t)y * w;
+        uint16_t *row = pl + row_offset;
         const uint16_t *up = y ? row - w : row;
         const uint16_t *up2 = y > 1 ? row - (size_t)w * 2u : up;
+        uint8_t *state_row_out = state_out ? state_out + row_offset : NULL;
+        const uint8_t *state_row_in =
+            state_in ? state_in + row_offset : NULL;
+        const uint8_t *tile_row =
+            tlog ? tp + (size_t)(y >> tlog) * ntx : NULL;
         int prevk = 0, prevs = 0, prev_uk = 0, prev_us = 0, wwk = 0, wws = 0;
         for (uint32_t x = 0; x < w; x++) {
             int Wv, Nv, NWv, NEv; NEIGHBORS();
             int WWv = x > 1 ? row[x - 2] : Wv;
             int NNv = y > 1 ? up2[x] : Nv;
-            size_t ti = tlog ? (size_t)(y >> tlog) * ntx + (x >> tlog) : 0;
-            int pid = tlog ? tp[ti] : 0;
+            int pid = tile_row ? tile_row[x >> tlog] : 0;
             int act = iabs(Wv - NWv) + iabs(NWv - Nv) + iabs(Nv - NEv) +
                       ((iabs(Wv - WWv) + iabs(Nv - NNv)) >> 1);
             int ck = prevk, cs = prevs;
             int uk = upk[x];
             int us = ups[x];
             act += uk <= 2 ? uk : 3;
-            if (uk > ck) { ck = uk; cs = ups[x]; }
+            if (uk > ck) { ck = uk; cs = us; }
             int aq = qctx(act);
-            int base_ctx = ectx(aq, ck, cs, 1);
-            int ctx = base_ctx + pctx2(pid);
-            size_t pi = (size_t)y * w + x;
-            int zero_state = local_ctx ? local_zero_ctx(prevk, uk, prevs, us) : 0;
+            int base_ctx =
+                aq * NERR + decode_error_context[ck][cs > 0];
+            int ctx = base_ctx + decode_predictor_context[pid];
+            int channel_context = state_row_in ? state_row_in[x] : 0;
+            int local_state =
+                local_ctx ? local_zero_ctx(prevk, uk, prevs, us) : 0;
+            int zero_state = local_state;
+            int cross_zero = 0;
+            int cross_magnitude = 0;
             if (spatial_ctx) {
                 int nek = x + 1 < w ? upk[x + 1] : 0;
                 int nes = x + 1 < w ? ups[x + 1] : 0;
@@ -3061,18 +3297,26 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
                 zero_state += 5 * ne_state + 15 * nw_state +
                               45 * (wwk ? (!prevk || wws == prevs ? 1 : 2) : 0);
             }
-            if (state_in) {
+            if (state_row_in) {
                 if (local_ctx) {
-                    int s = state_in[pi];
-                    int z = state_out ? channel_zero_state(s) :
-                        zero_pair[s];
-                    zero_state += local_states * z;
+                    if (state_row_out) {
+                        cross_zero = channel_zero_state(channel_context);
+                        cross_magnitude =
+                            channel_magnitude_state(channel_context);
+                    } else {
+                        cross_zero = zero_pair[channel_context];
+                        cross_magnitude = magnitude_pair[channel_context];
+                    }
+                    zero_state += local_states * cross_zero;
                 } else {
-                    zero_state += state_in[pi];
+                    zero_state += channel_context;
                 }
             }
             Prob *zero_parent = &m->unary[ctx][0];
-            Prob *zero = cross_states ? &cross[(size_t)zero_state * context_stride + (size_t)ctx] : zero_parent;
+            Prob *zero = cross_states
+                             ? &cross[(size_t)ctx * (size_t)cross_states +
+                                      (size_t)zero_state]
+                             : zero_parent;
             if (!*zero) *zero = *zero_parent;
             int k = 0;
             int nonzero;
@@ -3081,35 +3325,32 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
                 Prob *rp = &root->zero[aq];
                 if (zero != zero_parent) {
                     if (refined_sign)
-                        nonzero = dec_bit_mix4_custom(dec, zero, zero_parent,
-                                                      cp, rp, slow_zero,
-                                                      mode53_zero_weight,
-                                                      mode53_zero_rate);
+                        DEC37_MIX4_CUSTOM(zero, zero_parent, cp, rp,
+                                          slow_zero, mode53_zero_weight,
+                                          mode53_zero_rate, nonzero);
                     else
-                        nonzero = dec_bit_mix4(dec, zero, zero_parent, cp, rp,
-                                               slow_zero, 0);
+                        DEC37_MIX4(zero, zero_parent, cp, rp, slow_zero, 0,
+                                   nonzero);
                 } else
-                    nonzero = dec_bit_root(dec, zero_parent, cp, rp,
-                                           slow_zero);
+                    DEC37_ROOT(zero_parent, cp, rp, slow_zero, nonzero);
             } else if (coarse_ctx) {
                 Prob *cp = &coarse->zero[base_ctx];
-                if (zero != zero_parent) nonzero = dec_bit_mix3(dec, zero, zero_parent, cp);
-                else nonzero = dec_bit_coarse(dec, zero_parent, cp);
-            } else if (mix_ctx && zero != zero_parent)
-                nonzero = dec_bit_mix(dec, zero, zero_parent);
-            else {
-                nonzero = dec_bit(dec, zero);
                 if (zero != zero_parent)
-                    prob_update(zero_parent, nonzero, dec->adapt);
+                    DEC37_MIX3(zero, zero_parent, cp, nonzero);
+                else DEC37_COARSE(zero_parent, cp, nonzero);
+            } else if (mix_ctx && zero != zero_parent)
+                DEC37_MIX(zero, zero_parent, nonzero);
+            else {
+                DEC37_BIT(zero, nonzero);
+                if (zero != zero_parent)
+                    prob_update(zero_parent, nonzero, bit_adapt);
             }
             if (nonzero) {
                 k = 1;
                 Prob *u1 = &m->unary[ctx][1];
                 if (cross_mag) {
-                    int s = state_in[pi];
-                    int base = state_out ? channel_magnitude_state(s) :
-                        magnitude_pair[s];
-                    u1 = &cross_mag[(size_t)base * context_stride + (size_t)ctx];
+                    u1 = &cross_mag[(size_t)ctx * (size_t)mag_states +
+                                    (size_t)cross_magnitude];
                     if (!*u1) *u1 = m->unary[ctx][1];
                 }
                 int more;
@@ -3119,40 +3360,40 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
                     Prob *rp = &root->mag[aq];
                     if (cross_mag) {
                         if (refined_sign)
-                            more = dec_bit_mix4_custom(dec, u1, parent, cp,
-                                                       rp, slow_mag,
-                                                       mode53_magnitude_weight,
-                                                       mode53_magnitude_rate);
+                            DEC37_MIX4_CUSTOM(u1, parent, cp, rp, slow_mag,
+                                              mode53_magnitude_weight,
+                                              mode53_magnitude_rate, more);
                         else
-                            more = dec_bit_mix4(dec, u1, parent, cp, rp,
-                                                slow_mag, fast_mag);
+                            DEC37_MIX4(u1, parent, cp, rp, slow_mag, fast_mag,
+                                       more);
                     } else
-                        more = dec_bit_root(dec, parent, cp, rp, slow_mag);
+                        DEC37_ROOT(parent, cp, rp, slow_mag, more);
                 } else if (coarse_ctx) {
                     Prob *parent = &m->unary[ctx][1];
                     Prob *cp = &coarse->mag[base_ctx];
-                    if (cross_mag) more = dec_bit_mix3(dec, u1, parent, cp);
-                    else more = dec_bit_coarse(dec, parent, cp);
+                    if (cross_mag) DEC37_MIX3(u1, parent, cp, more);
+                    else DEC37_COARSE(parent, cp, more);
                 } else if (mix_ctx && cross_mag)
-                    more = dec_bit_mix(dec, u1, &m->unary[ctx][1]);
+                    DEC37_MIX(u1, &m->unary[ctx][1], more);
                 else {
-                    more = dec_bit(dec, u1);
-                    if (cross_mag) prob_update(&m->unary[ctx][1], more, dec->adapt);
+                    DEC37_BIT(u1, more);
+                    if (cross_mag)
+                        prob_update(&m->unary[ctx][1], more, bit_adapt);
                 }
                 if (more) {
                     k = 2;
                     while (k < depth) {
                         int bit;
                         if (root_ctx)
-                            bit = dec_bit_root(dec, &m->unary[ctx][k],
-                                               &coarse_full->unary[base_ctx][k],
-                                               &root_full->unary[aq][k],
-                                               slow_unary);
+                            DEC37_ROOT(&m->unary[ctx][k],
+                                       &coarse_full->unary[base_ctx][k],
+                                       &root_full->unary[aq][k], slow_unary,
+                                       bit);
                         else if (full_coarse)
-                            bit = dec_bit_coarse(dec, &m->unary[ctx][k],
-                                                 &coarse_full->unary[base_ctx][k]);
+                            DEC37_COARSE(&m->unary[ctx][k],
+                                         &coarse_full->unary[base_ctx][k], bit);
                         else
-                            bit = dec_bit(dec, &m->unary[ctx][k]);
+                            DEC37_BIT(&m->unary[ctx][k], bit);
                         if (!bit) break;
                         k++;
                     }
@@ -3164,15 +3405,15 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
                 for (int i = k - 2; i >= 0; i--) {
                     int bit;
                     if (root_ctx)
-                        bit = dec_bit_root(dec, &m->mant[ctx][k][i],
-                                           &coarse_full->mant[base_ctx][k][i],
-                                           &root_full->mant[aq][k][i],
-                                           slow_mant);
+                        DEC37_ROOT(&m->mant[ctx][k][i],
+                                   &coarse_full->mant[base_ctx][k][i],
+                                   &root_full->mant[aq][k][i], slow_mant,
+                                   bit);
                     else if (full_coarse)
-                        bit = dec_bit_coarse(dec, &m->mant[ctx][k][i],
-                                             &coarse_full->mant[base_ctx][k][i]);
+                        DEC37_COARSE(&m->mant[ctx][k][i],
+                                     &coarse_full->mant[base_ctx][k][i], bit);
                     else
-                        bit = dec_bit(dec, &m->mant[ctx][k][i]);
+                        DEC37_BIT(&m->mant[ctx][k][i], bit);
                     v |= (unsigned)bit << i;
                 }
             }
@@ -3184,6 +3425,15 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
             int pr;
             if (weighted_mode && pid == 31)
                 pr = weighted_prediction;
+            else if (pid == 0)
+                pr = predict(0, Wv, Nv, NWv, NEv, maxv);
+            else if (pid == 1)
+                pr = paethp(Wv, Nv, NWv);
+            else if (pid == 2) pr = Wv;
+            else if (pid == 3) pr = Nv;
+            else if (pid == 4) pr = (Wv + Nv + 1) >> 1;
+            else if (pid == 5)
+                pr = clampi(Nv + Wv - NWv, 0, maxv);
             else if (pid == 6) pr = NEv;
             else if (pid == 14)
                 pr = clampi((Wv + Nv + NEv + NWv + 2) >> 2, 0, maxv);
@@ -3197,12 +3447,11 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
                 Prob *p;
                 Prob *parent = hint ? &m->sg[ctx][hint < 0] : &m->nz[ctx];
                 if (cross_sign) {
-                    int s = state_in[pi];
-                    int cross_base = state_out ? channel_zero_state(s) :
-                        zero_pair[s];
-                    int base = cross_base * 5 + local_zero_ctx(prevk, uk, prevs, ups[x]);
+                    int base = cross_zero * 5 + local_state;
                     int hc = hint < 0 ? 2 : hint > 0;
-                    p = &cross_sign[(size_t)(base + sign_base_states * hc) * context_stride + (size_t)ctx];
+                    p = &cross_sign[
+                        (size_t)ctx * (size_t)sign_states +
+                        (size_t)(base + sign_base_states * hc)];
                     if (!*p) *p = *parent;
                 } else {
                     p = parent;
@@ -3217,35 +3466,36 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
                                     : &predictor->nz[pid][base_ctx][kb];
                     if (p != parent) {
                         if (exact_sign)
-                            neg = dec_bit_mix5_sign(dec, p, ep, parent, cp, rp,
-                                                    slow_sign,
-                                                    refined_sign ? sign53_weight[kb] : 12,
-                                                    refined_sign ? sign53_child_rate[kb] : 1,
-                                                    refined_sign ? sign53_exact_rate[kb] : 2);
+                            DEC37_MIX5_SIGN(
+                                p, ep, parent, cp, rp, slow_sign,
+                                refined_sign ? sign53_weight[kb] : 12,
+                                refined_sign ? sign53_child_rate[kb] : 1,
+                                refined_sign ? sign53_exact_rate[kb] : 2,
+                                neg);
                         else
-                            neg = dec_bit_mix4(dec, p, parent, cp, rp,
-                                               slow_sign, fast_sign);
+                            DEC37_MIX4(p, parent, cp, rp, slow_sign,
+                                       fast_sign, neg);
                     }
                     else if (exact_sign) {
                         if (refined_sign) {
-                            neg = dec_bit_mix4_custom(dec, ep, parent, cp, rp,
-                                                      slow_sign, 5,
-                                                      mode53_root_rate[kb]);
+                            DEC37_MIX4_SIGN_CUSTOM(
+                                ep, parent, cp, rp, slow_sign, 5,
+                                mode53_root_rate[kb], neg);
                         } else
-                            neg = dec_bit_mix4_weight(dec, ep, parent, cp, rp,
-                                                      slow_sign, 5);
+                            DEC37_MIX4_WEIGHT(ep, parent, cp, rp, slow_sign,
+                                              5, neg);
                     }
                     else
-                        neg = dec_bit_root(dec, parent, cp, rp, slow_sign);
+                        DEC37_ROOT(parent, cp, rp, slow_sign, neg);
                 } else if (coarse_ctx) {
                     Prob *cp = hint ? &coarse->sg[base_ctx][hint < 0] : &coarse->nz[base_ctx];
-                    if (p != parent) neg = dec_bit_mix3(dec, p, parent, cp);
-                    else neg = dec_bit_coarse(dec, parent, cp);
+                    if (p != parent) DEC37_MIX3(p, parent, cp, neg);
+                    else DEC37_COARSE(parent, cp, neg);
                 } else if (mix_ctx && p != parent)
-                    neg = dec_bit_mix(dec, p, parent);
+                    DEC37_MIX(p, parent, neg);
                 else {
-                    neg = dec_bit(dec, p);
-                    if (p != parent) prob_update(parent, neg, dec->adapt);
+                    DEC37_BIT(p, neg);
+                    if (p != parent) prob_update(parent, neg, bit_adapt);
                 }
                 if (cs) neg ^= cs < 0;
                 neg ^= hint < 0;
@@ -3260,18 +3510,34 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
             prevs = (e > 0) - (e < 0);
             upk[x] = (uint8_t)(k > 15 ? 15 : k);
             ups[x] = (int8_t)prevs;
-            if (state_out) {
+            if (state_row_out) {
                 uint8_t next_state = local_ctx
                     ? (uint8_t)channel_state(act, e, k)
                     : (uint8_t)((act > 16 ? 2 : 0) | (k != 0));
-                if (local_ctx && state_out == state_in)
-                    next_state = (uint8_t)((state_in[pi] << 4) | next_state);
-                state_out[pi] = next_state;
+                if (local_ctx && state_row_out == state_row_in)
+                    next_state =
+                        (uint8_t)((channel_context << 4) | next_state);
+                state_row_out[x] = next_state;
             }
             prev_uk = uk;
             prev_us = us;
         }
     }
+    dec->ptr = bit_cursor;
+    dec->range = bit_range;
+    dec->code = bit_code;
+    dec->truncated = bit_truncated;
+#undef DEC37_MIX5_SIGN
+#undef DEC37_MIX4_WEIGHT
+#undef DEC37_MIX4_SIGN_CUSTOM
+#undef DEC37_MIX4
+#undef DEC37_MIX4_CUSTOM
+#undef DEC37_MIX3
+#undef DEC37_MIX
+#undef DEC37_COARSE
+#undef DEC37_ROOT
+#undef DEC37_BIT
+#undef DEC37_VALUE
     weighted_predictor_free(&weighted);
     free(models);
     return STREAM_OK;
@@ -3282,6 +3548,31 @@ static QLIC_NOINLINE int decode_plane37(
     int cmap, int context_mode, uint8_t *state_out, const uint8_t *state_in) {
     return decode_plane37_impl(dec, pl, w, h, depth, tlog, cmap, context_mode,
                                state_out, state_in);
+}
+
+/* fixed wrappers keep mode checks out of the pixel loop */
+static QLIC_NOINLINE int decode_plane52_independent(
+    Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog) {
+    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 9, NULL, NULL);
+}
+
+static QLIC_NOINLINE int decode_plane52_first(
+    Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog,
+    uint8_t *state) {
+    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 9, state, NULL);
+}
+
+static QLIC_NOINLINE int decode_plane52_middle(
+    Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog,
+    uint8_t *state) {
+    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 9, state,
+                               state);
+}
+
+static QLIC_NOINLINE int decode_plane52_last(
+    Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog,
+    const uint8_t *state) {
+    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 9, NULL, state);
 }
 
 static QLIC_NOINLINE int decode_plane53_independent(
@@ -3952,7 +4243,7 @@ typedef struct {
     uint64_t xzr_map_mask;
     uint64_t map37_pair_mask;
     uint64_t zero_run_known_mask;
-    uint64_t zero_run_value_mask;
+    uint16_t zero_run_rate[36];
 } EncCtx;
 
 static int cached_transform_planes(const EncCtx *c, int transform,
@@ -3999,8 +4290,7 @@ static int cached_map37(const EncCtx *c, int transform, int tlog, int plane,
                          : key_transform >= 0 &&
                                (c->map37_pair_mask &
                                 (UINT64_C(1) << key_transform)) != 0;
-    if (!penalty && (tlog == 3 || tlog == 4) &&
-        (size_t)c->w * c->h <= 1000000u && want_pair) {
+    if ((tlog == 3 || tlog == 4) && want_pair) {
         Map37Entry *entry3 = NULL;
         Map37Entry *entry4 = NULL;
         for (int i = 0; i < cache->count; ++i) {
@@ -4030,7 +4320,8 @@ static int cached_map37(const EncCtx *c, int transform, int tlog, int plane,
                 cache->count -= 2;
                 return err;
             }
-            *out = tlog == 3 ? entry3->map : entry4->map;
+            Map37Entry *selected = tlog == 3 ? entry3 : entry4;
+            *out = penalty ? selected->reuse_map : selected->map;
             return STREAM_OK;
         }
     }
@@ -4766,10 +5057,10 @@ static void transform_px(const uint8_t *p, int t, int v[3]) {
     }
 }
 
-static int zero_run_candidate_for(EncCtx *c, int t) {
+static unsigned zero_run_rate_for(EncCtx *c, int t) {
     uint64_t bit = UINT64_C(1) << t;
     if (c->zero_run_known_mask & bit)
-        return (c->zero_run_value_mask & bit) != 0;
+        return c->zero_run_rate[t];
     uint32_t xs = c->w > 512u ? (c->w + 511u) / 512u : 1u;
     uint32_t ys = c->h > 128u ? (c->h + 127u) / 128u : 1u;
     uint64_t zero = 0, total = 0;
@@ -4802,10 +5093,78 @@ static int zero_run_candidate_for(EncCtx *c, int t) {
             }
         }
     }
-    int result = total && zero * 4u >= total;
+    unsigned rate = total
+                        ? (unsigned)((zero * 10000u) / total)
+                        : 0u;
     c->zero_run_known_mask |= bit;
-    if (result) c->zero_run_value_mask |= bit;
-    return result;
+    c->zero_run_rate[t] = (uint16_t)rate;
+    return rate;
+}
+
+static int zero_run_candidate_for(EncCtx *c, int t) {
+    return zero_run_rate_for(c, t) >= 2500u;
+}
+
+static int mapfree_candidate_for(const EncCtx *c, int transform,
+                                 int tile_log) {
+    if (!c->map37_cache || !tile_log) return 0;
+    uint32_t tiles_x = (c->w + (1u << tile_log) - 1u) >> tile_log;
+    const uint8_t *maps[3] = {0};
+    for (int plane = 0; plane < 3; ++plane) {
+        for (int index = 0; index < c->map37_cache->count; ++index) {
+            const Map37Entry *entry = &c->map37_cache->entries[index];
+            if (entry->transform == transform && entry->tlog == tile_log &&
+                entry->plane == plane) {
+                maps[plane] = entry->reuse_map;
+                break;
+            }
+        }
+        if (!maps[plane]) return 0;
+    }
+    uint64_t fixed_cost = 0;
+    uint64_t mapped_cost = 0;
+    uint32_t xs = c->w > 192u ? (c->w + 191u) / 192u : 1u;
+    uint32_t ys = c->h > 128u ? (c->h + 127u) / 128u : 1u;
+    size_t row_stride = (size_t)c->w * c->stride;
+    for (uint32_t y = 0; y < c->h; y += ys) {
+        for (uint32_t x = 0; x < c->w; x += xs) {
+            const uint8_t *pixel =
+                c->pix + ((size_t)y * c->w + x) * c->stride;
+            const uint8_t *west = x ? pixel - c->stride : pixel;
+            const uint8_t *north = y ? pixel - row_stride : west;
+            const uint8_t *northwest = x && y ? north - c->stride : north;
+            const uint8_t *northeast =
+                y && x + 1u < c->w ? north + c->stride : north;
+            const uint8_t *west2 = x > 1u ? west - c->stride : west;
+            const uint8_t *north2 = y > 1u ? north - row_stride : north;
+            int value[3], wv[3], nv[3], nwv[3], nev[3], ww[3], nn[3];
+            transform_px(pixel, transform, value);
+            transform_px(west, transform, wv);
+            transform_px(north, transform, nv);
+            transform_px(northwest, transform, nwv);
+            transform_px(northeast, transform, nev);
+            transform_px(west2, transform, ww);
+            transform_px(north2, transform, nn);
+            size_t tile = (size_t)(y >> tile_log) * tiles_x +
+                          (x >> tile_log);
+            for (int plane = 0; plane < 3; ++plane) {
+                int maximum = transform && plane ? 511 : 255;
+                int half = (maximum + 1) >> 1;
+                int fixed = predict(0, wv[plane], nv[plane], nwv[plane],
+                                    nev[plane], maximum);
+                int mapped = predicta_impl(
+                    maps[plane][tile], wv[plane], nv[plane], nwv[plane],
+                    nev[plane], ww[plane], nn[plane], maximum);
+                int fixed_error =
+                    ((value[plane] - fixed + half) & maximum) - half;
+                int mapped_error =
+                    ((value[plane] - mapped + half) & maximum) - half;
+                fixed_cost += predictor_cost_lut[iabs(fixed_error)];
+                mapped_cost += predictor_cost_lut[iabs(mapped_error)];
+            }
+        }
+    }
+    return fixed_cost <= mapped_cost + mapped_cost / 50u;
 }
 
 static int gray_unique_count(const EncCtx *c, int limit) {
@@ -5086,6 +5445,13 @@ static int build_palette(EncCtx *c) {
     return STREAM_OK;
 }
 
+static int encode_plane_sparse56(Enc *encoder, const uint16_t *plane,
+                                 uint32_t width, uint32_t height, int depth,
+                                 int tile_log, const uint8_t *map);
+static int decode_plane_sparse56(Dec *decoder, uint16_t *plane,
+                                 uint32_t width, uint32_t height, int depth,
+                                 int tile_log);
+
 static int encode_mode_plane(const EncCtx *c, Enc *e, const uint16_t *plane,
                              int depth, int mode, int transform, int tlog,
                              int plane_index, uint8_t *state_out,
@@ -5108,6 +5474,9 @@ static int encode_mode_plane(const EncCtx *c, Enc *e, const uint16_t *plane,
         return encode_plane_event(e, plane, c->w, c->h, depth, pos);
     case PLANE_PATTERN:
         return encode_plane_pattern(e, plane, c->w, c->h, depth, pos);
+    case PLANE_SPARSE:
+        return encode_plane_sparse56(e, plane, c->w, c->h, depth, tlog,
+                                     map);
     case PLANE_CONTEXT:
         return encode_plane37(
             e, plane, c->w, c->h, depth, tlog,
@@ -5136,7 +5505,23 @@ static int decode_mode_plane(Dec *d, uint16_t *plane, uint32_t w, uint32_t h,
         return decode_plane_event(d, plane, w, h, depth, pos);
     case PLANE_PATTERN:
         return decode_plane_pattern(d, plane, w, h, depth, pos);
+    case PLANE_SPARSE:
+        return decode_plane_sparse56(d, plane, w, h, depth, tlog);
     case PLANE_CONTEXT:
+        if (mode == 52) {
+            if (!state_in)
+                return state_out
+                           ? decode_plane52_first(d, plane, w, h, depth, tlog,
+                                                  state_out)
+                           : decode_plane52_independent(d, plane, w, h, depth,
+                                                        tlog);
+            if (!state_out)
+                return decode_plane52_last(d, plane, w, h, depth, tlog,
+                                           state_in);
+            if (state_out == state_in)
+                return decode_plane52_middle(d, plane, w, h, depth, tlog,
+                                             state_out);
+        }
         if (mode == 53) {
             if (!state_in)
                 return state_out
@@ -5163,6 +5548,2384 @@ static int decode_mode_plane(Dec *d, uint16_t *plane, uint32_t w, uint32_t h,
     }
 }
 
+#define FAST55_BASE_CONTEXTS 4320
+#define FAST55_PAIRED_CONTEXTS 7776
+#define FAST55_CONTEXTS_MAX FAST55_PAIRED_CONTEXTS
+#define FAST55_CLUSTERS 32
+#define FAST55_DIRECT 64
+#define FAST55_ESCAPE FAST55_DIRECT
+#define FAST55_RUN (FAST55_DIRECT + 1)
+#define FAST55_PRIMARY (FAST55_DIRECT + 2)
+#define FAST55_RUN_MIN 32u
+#define FAST55_REGIONS 2
+#define FAST55_SCALE_BITS 12
+#define FAST55_SCALE (1u << FAST55_SCALE_BITS)
+#define FAST55_RANS_L (1u << 23)
+#define FAST55_LANES 4
+#define FAST55_SIMPLE_CONTEXT_FLAG 16
+#define FAST55_PAIRED_CONTEXT_FLAG 32
+
+typedef struct {
+    uint8_t *data;
+    size_t size;
+    size_t capacity;
+    size_t limit;
+} Fast55Buffer;
+
+typedef struct {
+    uint16_t start;
+    uint16_t frequency;
+} Fast55Symbol;
+
+static int fast55_reserve(Fast55Buffer *buffer, size_t extra) {
+    if (extra > buffer->limit - buffer->size) return 0;
+    size_t needed = buffer->size + extra;
+    if (needed <= buffer->capacity) return 1;
+    size_t capacity = buffer->capacity ? buffer->capacity : 65536u;
+    while (capacity < needed) {
+        if (capacity > SIZE_MAX / 2u) {
+            capacity = needed;
+            break;
+        }
+        capacity *= 2u;
+    }
+    if (capacity > buffer->limit) capacity = buffer->limit;
+    uint8_t *data = realloc(buffer->data, capacity);
+    if (!data) return 0;
+    buffer->data = data;
+    buffer->capacity = capacity;
+    return 1;
+}
+
+static int fast55_append(Fast55Buffer *buffer, const void *data, size_t size) {
+    if (!fast55_reserve(buffer, size)) return 0;
+    memcpy(buffer->data + buffer->size, data, size);
+    buffer->size += size;
+    return 1;
+}
+
+static int fast55_u32(Fast55Buffer *buffer, uint32_t value) {
+    uint8_t bytes[4];
+    put32(bytes, value);
+    return fast55_append(buffer, bytes, sizeof(bytes));
+}
+
+static int fast55_uint(Fast55Buffer *buffer, uint32_t value) {
+    uint8_t bytes[5];
+    size_t count = 0;
+    do {
+        uint8_t byte = (uint8_t)(value & 127u);
+        value >>= 7;
+        if (value) byte |= 128u;
+        bytes[count++] = byte;
+    } while (value);
+    return fast55_append(buffer, bytes, count);
+}
+
+static QLIC_FORCEINLINE int fast55_activity(int value) {
+    return qctx(value);
+}
+
+static QLIC_FORCEINLINE int fast55_error_state(uint8_t left, uint8_t up) {
+    return fast55_error_context_lut[(unsigned)left * 32u + up];
+}
+
+static QLIC_FORCEINLINE int fast55_predictor_group(int predictor) {
+    return !predictor ? 0 : predictor <= 4 ? 1 : predictor <= 10 ? 2 : 3;
+}
+
+static QLIC_FORCEINLINE int fast55_activity_reference(
+    int W, int N, int NW, int NE, int WW, int NN, int maximum,
+    int *activity) {
+    int west_west = iabs(W - WW);
+    int north_northwest = iabs(N - NW);
+    int northeast_north = iabs(NE - N);
+    int west_northwest = iabs(W - NW);
+    int north_north = iabs(N - NN);
+    *activity = west_northwest + north_northwest + northeast_north +
+                ((west_west + north_north) >> 1);
+    int direction = west_northwest + north_north - west_west -
+                    north_northwest;
+    int reference;
+    if (direction > 80) reference = W;
+    else if (direction < -80) reference = N;
+    else {
+        reference = ((W + N) >> 1) + ((NE - NW) >> 2);
+        if (direction > 32) reference = (reference + W) >> 1;
+        else if (direction > 8) reference = (3 * reference + W) >> 2;
+        else if (direction < -32) reference = (reference + N) >> 1;
+        else if (direction < -8) reference = (3 * reference + N) >> 2;
+    }
+    reference = clampi(reference, 0, maximum);
+    return reference;
+}
+
+static QLIC_FORCEINLINE int fast55_activity_hint_reference(
+    int W, int N, int NW, int NE, int WW, int NN, int *activity) {
+    int west_west = iabs(W - WW);
+    int north_northwest = iabs(N - NW);
+    int northeast_north = iabs(NE - N);
+    int west_northwest = iabs(W - NW);
+    int north_north = iabs(N - NN);
+    *activity = west_northwest + north_northwest + northeast_north +
+                ((west_west + north_north) >> 1);
+    int lower = W < N ? W : N;
+    int upper = W > N ? W : N;
+    int reference = clampi(
+        ((W + N) >> 1) + ((NE - NW) >> 3), lower, upper);
+    return reference;
+}
+
+static QLIC_FORCEINLINE uint8_t fast55_channel_state(unsigned symbol) {
+    return fast55_residual_lut[symbol].channel_state;
+}
+
+static QLIC_FORCEINLINE unsigned fast55_log2_q12(uint32_t value) {
+    if (value <= 1u) return 0;
+    unsigned exponent = (unsigned)nbits(value) - 1u;
+    uint32_t base = 1u << exponent;
+    uint32_t fraction = (uint32_t)(((uint64_t)(value - base) << 12) / base);
+    uint32_t curve = (uint32_t)(((uint64_t)fraction * (4096u - fraction)) >> 13);
+    return exponent * 4096u + fraction + curve;
+}
+
+typedef struct {
+    uint16_t context;
+    uint32_t mean;
+} Fast55ActiveContext;
+
+static int fast55_context_compare(const void *left, const void *right) {
+    const Fast55ActiveContext *a = left;
+    const Fast55ActiveContext *b = right;
+    if (a->mean != b->mean) return a->mean < b->mean ? -1 : 1;
+    return (int)a->context - (int)b->context;
+}
+
+static void fast55_context_sift(Fast55ActiveContext *active, int root,
+                                int end) {
+    while (root * 2 + 1 <= end) {
+        int child = root * 2 + 1;
+        int swap = root;
+        if (fast55_context_compare(active + swap, active + child) < 0)
+            swap = child;
+        if (child + 1 <= end &&
+            fast55_context_compare(active + swap, active + child + 1) < 0)
+            swap = child + 1;
+        if (swap == root) return;
+        Fast55ActiveContext temporary = active[root];
+        active[root] = active[swap];
+        active[swap] = temporary;
+        root = swap;
+    }
+}
+
+static void fast55_context_sort(Fast55ActiveContext *active, int count) {
+    if (count < 2) return;
+    for (int start = (count - 2) / 2; start >= 0; --start)
+        fast55_context_sift(active, start, count - 1);
+    for (int end = count - 1; end > 0; --end) {
+        Fast55ActiveContext temporary = active[end];
+        active[end] = active[0];
+        active[0] = temporary;
+        fast55_context_sift(active, 0, end - 1);
+    }
+}
+
+static void fast55_cluster(const uint32_t *histogram,
+                           uint8_t mapping[FAST55_CONTEXTS_MAX],
+                           int cluster_count, int context_count) {
+    uint64_t tables[FAST55_CLUSTERS][FAST55_PRIMARY];
+    Fast55ActiveContext active[FAST55_CONTEXTS_MAX];
+    uint8_t support_count[FAST55_CONTEXTS_MAX];
+    uint8_t *support = malloc((size_t)context_count * FAST55_PRIMARY);
+    int active_count = 0;
+    memset(mapping, 0, (size_t)context_count);
+    memset(support_count, 0, (size_t)context_count);
+    for (int context = 0; context < context_count; ++context) {
+        const uint32_t *source =
+            histogram + (size_t)context * FAST55_PRIMARY;
+        uint64_t total = 0;
+        uint64_t weighted = 0;
+        for (int symbol = 0; symbol < FAST55_PRIMARY; ++symbol) {
+            uint64_t count = source[symbol];
+            total += count;
+            weighted += count * (uint64_t)symbol;
+            if (support && count)
+                support[(size_t)context * FAST55_PRIMARY +
+                        support_count[context]++] = (uint8_t)symbol;
+        }
+        if (!total) continue;
+        active[active_count].context = (uint16_t)context;
+        active[active_count].mean =
+            (uint32_t)((weighted << 16) / total);
+        ++active_count;
+    }
+    if (!active_count) {
+        free(support);
+        return;
+    }
+    fast55_context_sort(active, active_count);
+    for (int index = 0; index < active_count; ++index)
+        mapping[active[index].context] = (uint8_t)(
+            (uint64_t)index * (uint64_t)cluster_count /
+            (uint64_t)active_count);
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        memset(tables, 0, sizeof(tables));
+        uint64_t totals[FAST55_CLUSTERS] = {0};
+        for (int index = 0; index < active_count; ++index) {
+            int context = active[index].context;
+            int cluster = mapping[context];
+            const uint32_t *source =
+                histogram + (size_t)context * FAST55_PRIMARY;
+            uint64_t *table = tables[cluster];
+            uint64_t source_total = 0;
+            if (support) {
+                const uint8_t *symbols =
+                    support + (size_t)context * FAST55_PRIMARY;
+                for (int item = 0; item < support_count[context]; ++item) {
+                    int symbol = symbols[item];
+                    table[symbol] += source[symbol];
+                    source_total += source[symbol];
+                }
+            } else {
+                for (int symbol = 0; symbol < FAST55_PRIMARY; ++symbol) {
+                    table[symbol] += source[symbol];
+                    source_total += source[symbol];
+                }
+            }
+            totals[cluster] += source_total;
+        }
+        uint32_t symbol_cost[FAST55_CLUSTERS][FAST55_PRIMARY];
+        for (int cluster = 0; cluster < cluster_count; ++cluster) {
+            uint64_t table_total = FAST55_PRIMARY + totals[cluster];
+            unsigned total_cost = fast55_log2_q12(
+                table_total > UINT32_MAX ? UINT32_MAX :
+                                           (uint32_t)table_total);
+            for (int symbol = 0; symbol < FAST55_PRIMARY; ++symbol) {
+                uint64_t count = tables[cluster][symbol] + 1u;
+                symbol_cost[cluster][symbol] =
+                    total_cost - fast55_log2_q12(
+                        count > UINT32_MAX ? UINT32_MAX :
+                                             (uint32_t)count);
+            }
+        }
+        int changed = 0;
+        for (int index = 0; index < active_count; ++index) {
+            int context = active[index].context;
+            const uint32_t *source =
+                histogram + (size_t)context * FAST55_PRIMARY;
+            uint64_t best_cost = UINT64_MAX;
+            int best = 0;
+            for (int cluster = 0; cluster < cluster_count; ++cluster) {
+                uint64_t cost = 0;
+                if (support) {
+                    const uint8_t *symbols =
+                        support + (size_t)context * FAST55_PRIMARY;
+                    for (int item = 0; item < support_count[context];
+                         ++item) {
+                        int symbol = symbols[item];
+                        cost += (uint64_t)source[symbol] *
+                                symbol_cost[cluster][symbol];
+                    }
+                } else {
+                    for (int symbol = 0; symbol < FAST55_PRIMARY; ++symbol)
+                        if (source[symbol])
+                            cost += (uint64_t)source[symbol] *
+                                    symbol_cost[cluster][symbol];
+                }
+                if (cost < best_cost) {
+                    best_cost = cost;
+                    best = cluster;
+                }
+            }
+            changed |= mapping[context] != best;
+            mapping[context] = (uint8_t)best;
+        }
+        if (!changed) break;
+    }
+    free(support);
+}
+
+static void fast55_normalize(const uint64_t *counts, int alphabet,
+                             Fast55Symbol *symbols, uint16_t *frequencies);
+
+static void fast55_partition_costs(
+    const uint64_t *quarter_counts, int cluster_count,
+    uint64_t *half_cost, uint64_t *quarter_cost) {
+    uint64_t costs[2] = {0, 0};
+    for (int choice = 0; choice < 2; ++choice) {
+        int split = choice ? 1 : 2;
+        for (int region = 0; region < FAST55_REGIONS; ++region) {
+            for (int cluster = 0; cluster < cluster_count; ++cluster) {
+                uint64_t counts[FAST55_PRIMARY] = {0};
+                for (int source_region = 0; source_region < 4;
+                     ++source_region) {
+                    if ((source_region >= split) != region) continue;
+                    for (int symbol = 0; symbol < FAST55_PRIMARY; ++symbol)
+                        counts[symbol] += quarter_counts[
+                            ((size_t)source_region * (size_t)cluster_count +
+                             (size_t)cluster) * FAST55_PRIMARY +
+                            (size_t)symbol];
+                }
+                Fast55Symbol symbols[FAST55_PRIMARY];
+                uint16_t frequencies[FAST55_PRIMARY];
+                fast55_normalize(counts, FAST55_PRIMARY, symbols,
+                                 frequencies);
+                for (int symbol = 0; symbol < FAST55_PRIMARY; ++symbol) {
+                    if (!counts[symbol]) continue;
+                    unsigned frequency_log =
+                        fast55_log2_q12(frequencies[symbol]);
+                    costs[choice] += counts[symbol] *
+                        (uint64_t)(FAST55_SCALE_BITS * 4096u -
+                                   frequency_log);
+                }
+            }
+        }
+    }
+    *half_cost = costs[0];
+    *quarter_cost = costs[1];
+}
+
+static void fast55_normalize(const uint64_t *counts, int alphabet,
+                             Fast55Symbol *symbols, uint16_t *frequencies) {
+    uint64_t total = 0;
+    for (int symbol = 0; symbol < alphabet; ++symbol) total += counts[symbol];
+    if (!total) {
+        memset(frequencies, 0, (size_t)alphabet * sizeof(*frequencies));
+        frequencies[0] = FAST55_SCALE;
+    } else {
+        unsigned sum = 0;
+        for (int symbol = 0; symbol < alphabet; ++symbol) {
+            unsigned frequency = counts[symbol]
+                                     ? (unsigned)((counts[symbol] * FAST55_SCALE) / total)
+                                     : 0u;
+            if (counts[symbol] && !frequency) frequency = 1;
+            frequencies[symbol] = (uint16_t)frequency;
+            sum += frequency;
+        }
+        while (sum < FAST55_SCALE) {
+            int best = -1;
+            uint64_t best_gain = 0;
+            for (int symbol = 0; symbol < alphabet; ++symbol) {
+                unsigned frequency = frequencies[symbol];
+                if (!counts[symbol] || frequency >= FAST55_SCALE) continue;
+                uint64_t gain = counts[symbol] *
+                    (fast55_log2_q12(frequency + 1u) -
+                     fast55_log2_q12(frequency));
+                if (best < 0 || gain > best_gain) {
+                    best = symbol;
+                    best_gain = gain;
+                }
+            }
+            if (best < 0) break;
+            ++frequencies[best];
+            ++sum;
+        }
+        while (sum > FAST55_SCALE) {
+            int best = -1;
+            uint64_t best_loss = UINT64_MAX;
+            for (int symbol = 0; symbol < alphabet; ++symbol)
+                if (frequencies[symbol] > 1u) {
+                    unsigned frequency = frequencies[symbol];
+                    uint64_t loss = counts[symbol] *
+                        (fast55_log2_q12(frequency) -
+                         fast55_log2_q12(frequency - 1u));
+                    if (loss < best_loss) {
+                    best = symbol;
+                        best_loss = loss;
+                    }
+                }
+            if (best < 0) break;
+            --frequencies[best];
+            --sum;
+        }
+    }
+    unsigned start = 0;
+    for (int symbol = 0; symbol < alphabet; ++symbol) {
+        symbols[symbol].start = (uint16_t)start;
+        symbols[symbol].frequency = frequencies[symbol];
+        start += frequencies[symbol];
+    }
+}
+
+static void fast55_refine_normalized(
+    const uint32_t *histogram, uint8_t *mapping, int cluster_count,
+    int context_count) {
+    uint64_t tables[FAST55_CLUSTERS][FAST55_PRIMARY];
+    uint32_t costs[FAST55_CLUSTERS][FAST55_PRIMARY];
+    uint16_t active[FAST55_CONTEXTS_MAX];
+    uint8_t support_count[FAST55_CONTEXTS_MAX];
+    uint8_t *support = malloc((size_t)context_count * FAST55_PRIMARY);
+    if (!support) return;
+    int active_count = 0;
+    memset(support_count, 0, (size_t)context_count);
+    for (int context = 0; context < context_count; ++context) {
+        const uint32_t *source =
+            histogram + (size_t)context * FAST55_PRIMARY;
+        for (int symbol = 0; symbol < FAST55_PRIMARY; ++symbol)
+            if (source[symbol])
+                support[(size_t)context * FAST55_PRIMARY +
+                        support_count[context]++] = (uint8_t)symbol;
+        if (support_count[context]) active[active_count++] =
+            (uint16_t)context;
+    }
+    for (int iteration = 0; iteration < 1; ++iteration) {
+        memset(tables, 0, sizeof(tables));
+        for (int index = 0; index < active_count; ++index) {
+            int context = active[index];
+            uint64_t *table = tables[mapping[context]];
+            const uint32_t *source =
+                histogram + (size_t)context * FAST55_PRIMARY;
+            const uint8_t *symbols =
+                support + (size_t)context * FAST55_PRIMARY;
+            for (int item = 0; item < support_count[context]; ++item) {
+                int symbol = symbols[item];
+                table[symbol] += source[symbol];
+            }
+        }
+        for (int cluster = 0; cluster < cluster_count; ++cluster) {
+            Fast55Symbol symbols[FAST55_PRIMARY];
+            uint16_t frequencies[FAST55_PRIMARY];
+            fast55_normalize(tables[cluster], FAST55_PRIMARY, symbols,
+                             frequencies);
+            for (int symbol = 0; symbol < FAST55_PRIMARY; ++symbol)
+                costs[cluster][symbol] = frequencies[symbol]
+                    ? FAST55_SCALE_BITS * 4096u -
+                          fast55_log2_q12(frequencies[symbol])
+                    : UINT32_MAX;
+        }
+        int changed = 0;
+        for (int index = 0; index < active_count; ++index) {
+            int context = active[index];
+            const uint32_t *source =
+                histogram + (size_t)context * FAST55_PRIMARY;
+            const uint8_t *symbols =
+                support + (size_t)context * FAST55_PRIMARY;
+            int current = mapping[context];
+            uint64_t best_cost = 0;
+            for (int item = 0; item < support_count[context]; ++item) {
+                int symbol = symbols[item];
+                uint32_t count = source[symbol];
+                best_cost += (uint64_t)count * costs[current][symbol];
+            }
+            int best = current;
+            for (int cluster = 0; cluster < cluster_count; ++cluster) {
+                if (cluster == current) continue;
+                uint64_t cost = 0;
+                int valid = 1;
+                for (int item = 0; item < support_count[context]; ++item) {
+                    int symbol = symbols[item];
+                    uint32_t count = source[symbol];
+                    if (costs[cluster][symbol] == UINT32_MAX) {
+                        valid = 0;
+                        break;
+                    }
+                    cost += (uint64_t)count * costs[cluster][symbol];
+                }
+                if (valid && cost < best_cost) {
+                    best_cost = cost;
+                    best = cluster;
+                }
+            }
+            changed |= best != current;
+            mapping[context] = (uint8_t)best;
+        }
+        if (!changed) break;
+    }
+    free(support);
+}
+
+static QLIC_FORCEINLINE void fast55_rans_put(uint32_t *state,
+                                              Fast55Symbol symbol,
+                                              uint8_t **output) {
+    uint32_t value = *state;
+    uint32_t maximum = (uint32_t)(((FAST55_RANS_L >> FAST55_SCALE_BITS) << 8) *
+                                  (uint32_t)symbol.frequency);
+    while (value >= maximum) {
+        *--*output = (uint8_t)value;
+        value >>= 8;
+    }
+    *state = (value / symbol.frequency << FAST55_SCALE_BITS) +
+             value % symbol.frequency + symbol.start;
+}
+
+static int fast55_encode_map(Enc *encoder, const uint8_t *map,
+                             size_t tiles, uint32_t tiles_x) {
+    Prob tree[NPREDX];
+    Prob same[2][4];
+    probabilities_init(tree, NPREDX);
+    probabilities_init((Prob *)same, 8);
+    for (size_t index = 0; index < tiles && !encoder->cut; ++index) {
+        int predictor = map[index];
+        int write_tree = 1;
+        uint32_t tile_x = (uint32_t)(index % tiles_x);
+        if (tile_x) {
+            int reference = map[index - 1u];
+            int group = fast55_predictor_group(reference);
+            int different = predictor != reference;
+            enc_bit(encoder, &same[0][group], different);
+            if (!different) write_tree = 0;
+        }
+        if (write_tree && index >= tiles_x &&
+            (!tile_x || map[index - tiles_x] != map[index - 1u])) {
+            int reference = map[index - tiles_x];
+            int group = fast55_predictor_group(reference);
+            int different = predictor != reference;
+            enc_bit(encoder, &same[1][group], different);
+            if (!different) write_tree = 0;
+        }
+        if (write_tree) enc_tree5(encoder, tree, predictor);
+    }
+    return encoder->oom ? STREAM_E_ALLOC :
+           encoder->cut ? STREAM_E_FORMAT : STREAM_OK;
+}
+
+static int fast55_decode_map(Dec *decoder, uint8_t *map, size_t tiles,
+                             uint32_t tiles_x) {
+    Prob tree[NPREDX];
+    Prob same[2][4];
+    probabilities_init(tree, NPREDX);
+    probabilities_init((Prob *)same, 8);
+    for (size_t index = 0; index < tiles; ++index) {
+        int predictor = -1;
+        uint32_t tile_x = (uint32_t)(index % tiles_x);
+        if (tile_x) {
+            int reference = map[index - 1u];
+            int group = fast55_predictor_group(reference);
+            if (!dec_bit(decoder, &same[0][group])) predictor = reference;
+        }
+        if (predictor < 0 && index >= tiles_x &&
+            (!tile_x || map[index - tiles_x] != map[index - 1u])) {
+            int reference = map[index - tiles_x];
+            int group = fast55_predictor_group(reference);
+            if (!dec_bit(decoder, &same[1][group])) predictor = reference;
+        }
+        if (predictor < 0) predictor = dec_tree5(decoder, tree);
+        if ((unsigned)predictor >= NPREDX) return STREAM_E_CORRUPT;
+        map[index] = (uint8_t)predictor;
+    }
+    return decoder->truncated ? STREAM_E_CORRUPT : STREAM_OK;
+}
+
+#define SPARSE56_RUN_CONTEXTS 9
+#define SPARSE56_RUN_BITS 29
+
+typedef struct {
+    Prob run_unary[SPARSE56_RUN_CONTEXTS][SPARSE56_RUN_BITS + 1];
+    Prob run_mant[SPARSE56_RUN_CONTEXTS][SPARSE56_RUN_BITS + 1]
+                 [SPARSE56_RUN_BITS];
+    Prob unary[NCTX][MAXK + 1];
+    Prob mant[NCTX][MAXK + 1][MAXK];
+    Prob sign[NCTX];
+} Sparse56Model;
+
+typedef struct {
+    uint32_t position;
+    int16_t residual;
+} Sparse56Event;
+
+static QLIC_FORCEINLINE int sparse56_run_context(int magnitude, int sign) {
+    int group = magnitude > 3 ? 3 : magnitude;
+    return 1 + group * 2 + (sign < 0);
+}
+
+static QLIC_FORCEINLINE void sparse56_encode_uint(Enc *encoder,
+                                                   Sparse56Model *model,
+                                                   int context,
+                                                   uint32_t value) {
+    int bits = nbits(value);
+    if (bits > SPARSE56_RUN_BITS) {
+        encoder->cut = 1;
+        return;
+    }
+    for (int index = 0; index < bits; ++index)
+        enc_bit(encoder, &model->run_unary[context][index], 1);
+    if (bits < SPARSE56_RUN_BITS)
+        enc_bit(encoder, &model->run_unary[context][bits], 0);
+    for (int index = bits - 2; index >= 0; --index)
+        enc_bit(encoder, &model->run_mant[context][bits][index],
+                (value >> index) & 1u);
+}
+
+static QLIC_FORCEINLINE uint32_t sparse56_decode_uint(Dec *decoder,
+                                                       Sparse56Model *model,
+                                                       int context) {
+    int bits = 0;
+    while (bits < SPARSE56_RUN_BITS &&
+           dec_bit(decoder, &model->run_unary[context][bits]))
+        ++bits;
+    uint32_t value = bits ? 1u << (bits - 1) : 0u;
+    for (int index = bits - 2; index >= 0; --index)
+        value |= (uint32_t)dec_bit(
+                     decoder, &model->run_mant[context][bits][index])
+                 << index;
+    return value;
+}
+
+typedef struct {
+    Dec *decoder;
+    Sparse56Model *model;
+    size_t pixels;
+    size_t next;
+    uint32_t remaining;
+    uint32_t skip;
+    int previous_magnitude;
+    int previous_sign;
+} Sparse56Cursor;
+
+static QLIC_NOINLINE int sparse56_decode_event(Sparse56Cursor *cursor,
+                                                size_t position, int depth,
+                                                int half, int *residual) {
+    int context = ectx(
+        qctx(cursor->skip > 512u ? 512 : (int)cursor->skip),
+        cursor->previous_magnitude, cursor->previous_sign, 1);
+    int bits = 0;
+    while (bits < depth &&
+           dec_bit(cursor->decoder, &cursor->model->unary[context][bits]))
+        ++bits;
+    unsigned value = bits ? 1u << (bits - 1) : 0u;
+    for (int index = bits - 2; index >= 0; --index)
+        value |= (unsigned)dec_bit(
+                     cursor->decoder,
+                     &cursor->model->mant[context][bits][index])
+                 << index;
+    unsigned magnitude = value + 1u;
+    if (magnitude > (unsigned)half) return 0;
+    int negative = dec_bit(cursor->decoder, &cursor->model->sign[context]);
+    if (cursor->previous_sign) negative ^= cursor->previous_sign < 0;
+    *residual = negative ? -(int)magnitude : (int)magnitude;
+    cursor->previous_magnitude = predictor_nbits_lut[magnitude];
+    cursor->previous_sign = (*residual > 0) - (*residual < 0);
+    --cursor->remaining;
+    if (!cursor->remaining) {
+        cursor->next = SIZE_MAX;
+        return !cursor->decoder->truncated;
+    }
+    cursor->skip = sparse56_decode_uint(
+        cursor->decoder, cursor->model,
+        sparse56_run_context(cursor->previous_magnitude,
+                             cursor->previous_sign));
+    if ((size_t)cursor->skip >= cursor->pixels - position - 1u) return 0;
+    cursor->next = position + 1u + cursor->skip;
+    return !cursor->decoder->truncated;
+}
+
+static int encode_plane_sparse56(Enc *encoder, const uint16_t *plane,
+                                 uint32_t width, uint32_t height, int depth,
+                                 int tile_log, const uint8_t *map) {
+    if (!tile_log || !map) return STREAM_E_FORMAT;
+    model_ensure();
+    uint32_t tiles_x =
+        (width + (1u << tile_log) - 1u) >> tile_log;
+    uint32_t tiles_y =
+        (height + (1u << tile_log) - 1u) >> tile_log;
+    size_t tiles = (size_t)tiles_x * tiles_y;
+    int error = fast55_encode_map(encoder, map, tiles, tiles_x);
+    if (error != STREAM_OK) return error;
+
+    int half = 1 << (depth - 1);
+    int maximum = (1 << depth) - 1;
+    uint32_t w = width;
+    size_t pixels = (size_t)width * height;
+    size_t event_limit = pixels / 2u + 1u;
+    size_t event_capacity = pixels / 16u + 1u;
+    if (event_capacity > 65536u) event_capacity = 65536u;
+    if (event_capacity > event_limit) event_capacity = event_limit;
+    Sparse56Event *events = malloc(event_capacity * sizeof(*events));
+    if (!events) return STREAM_E_ALLOC;
+    size_t event_count = 0;
+    for (uint32_t y = 0; y < height; ++y) {
+        const uint16_t *row = plane + (size_t)y * width;
+        const uint16_t *up = y ? row - width : row;
+        const uint16_t *up2 = y > 1 ? up - width : up;
+        const uint8_t *tile_row =
+            map + (size_t)(y >> tile_log) * tiles_x;
+        for (uint32_t x = 0; x < width; ++x) {
+            int Wv, Nv, NWv, NEv; NEIGHBORS();
+            int WWv = x > 1 ? row[x - 2u] : Wv;
+            int NNv = y > 1 ? up2[x] : Nv;
+            int predictor = tile_row[x >> tile_log];
+            int prediction = predicta_impl(
+                predictor, Wv, Nv, NWv, NEv, WWv, NNv, maximum);
+            int residual =
+                ((row[x] - prediction + half) & maximum) - half;
+            if (!residual) continue;
+            if (event_count == event_limit) {
+                free(events);
+                return STREAM_E_FORMAT;
+            }
+            if (event_count == event_capacity) {
+                size_t capacity = event_capacity * 2u;
+                if (capacity > event_limit) capacity = event_limit;
+                Sparse56Event *grown =
+                    realloc(events, capacity * sizeof(*events));
+                if (!grown) {
+                    free(events);
+                    return STREAM_E_ALLOC;
+                }
+                events = grown;
+                event_capacity = capacity;
+            }
+            events[event_count].position = (uint32_t)((size_t)y * width + x);
+            events[event_count].residual = (int16_t)residual;
+            ++event_count;
+        }
+    }
+    if (event_count * 2u > pixels) {
+        free(events);
+        return STREAM_E_FORMAT;
+    }
+
+    Sparse56Model *model = malloc(sizeof(*model));
+    if (!model) {
+        free(events);
+        return STREAM_E_ALLOC;
+    }
+    probabilities_init((Prob *)model, sizeof(*model) / sizeof(Prob));
+    sparse56_encode_uint(encoder, model, 0, (uint32_t)event_count);
+    size_t previous = SIZE_MAX;
+    int previous_magnitude = 0;
+    int previous_sign = 0;
+    for (size_t index = 0; index < event_count && !encoder->cut; ++index) {
+        size_t position = events[index].position;
+        int residual = events[index].residual;
+        uint32_t skip = (uint32_t)(
+            previous == SIZE_MAX ? position : position - previous - 1u);
+        sparse56_encode_uint(
+            encoder, model,
+            sparse56_run_context(previous_magnitude, previous_sign), skip);
+        int context = ectx(qctx(skip > 512u ? 512 : (int)skip),
+                           previous_magnitude, previous_sign, 1);
+        unsigned magnitude = (unsigned)iabs(residual);
+        unsigned value = magnitude - 1u;
+        int bits = predictor_nbits_lut[value];
+        for (int bit = 0; bit < bits; ++bit)
+            enc_bit(encoder, &model->unary[context][bit], 1);
+        if (bits < depth)
+            enc_bit(encoder, &model->unary[context][bits], 0);
+        for (int bit = bits - 2; bit >= 0; --bit)
+            enc_bit(encoder, &model->mant[context][bits][bit],
+                    (value >> bit) & 1u);
+        int negative = residual < 0;
+        if (previous_sign) negative ^= previous_sign < 0;
+        enc_bit(encoder, &model->sign[context], negative);
+        previous = position;
+        previous_magnitude = predictor_nbits_lut[magnitude];
+        previous_sign = (residual > 0) - (residual < 0);
+    }
+    free(model);
+    free(events);
+    return encoder->oom ? STREAM_E_ALLOC :
+           encoder->cut ? STREAM_E_FORMAT : STREAM_OK;
+}
+
+static int decode_plane_sparse56(Dec *decoder, uint16_t *plane,
+                                 uint32_t width, uint32_t height, int depth,
+                                 int tile_log) {
+    if (!tile_log) return STREAM_E_FORMAT;
+    model_ensure();
+    uint32_t tiles_x =
+        (width + (1u << tile_log) - 1u) >> tile_log;
+    uint32_t tiles_y =
+        (height + (1u << tile_log) - 1u) >> tile_log;
+    size_t tiles = (size_t)tiles_x * tiles_y;
+    uint8_t *map = malloc(tiles);
+    Sparse56Model *model = malloc(sizeof(*model));
+    if (!map || !model) {
+        free(model);
+        free(map);
+        return STREAM_E_ALLOC;
+    }
+    int error = fast55_decode_map(decoder, map, tiles, tiles_x);
+    if (error != STREAM_OK) {
+        free(model);
+        free(map);
+        return error;
+    }
+    probabilities_init((Prob *)model, sizeof(*model) / sizeof(Prob));
+    size_t pixels = (size_t)width * height;
+    uint32_t events = sparse56_decode_uint(decoder, model, 0);
+    if (events > pixels || decoder->truncated) {
+        free(model);
+        free(map);
+        return STREAM_E_CORRUPT;
+    }
+    Sparse56Cursor cursor = {
+        decoder, model, pixels, SIZE_MAX, events, 0, 0, 0
+    };
+    if (cursor.remaining) {
+        cursor.skip = sparse56_decode_uint(
+            decoder, model, sparse56_run_context(0, 0));
+        if ((size_t)cursor.skip >= pixels) {
+            free(model);
+            free(map);
+            return STREAM_E_CORRUPT;
+        }
+        cursor.next = cursor.skip;
+    }
+    int half = 1 << (depth - 1);
+    int maximum = (1 << depth) - 1;
+    uint32_t w = width;
+    size_t position = 0;
+#define SPARSE56_DECODE_RANGE(prediction_expression) do { \
+    while (x < end) { \
+        int Wv, Nv, NWv, NEv; NEIGHBORS(); \
+        int WWv = x > 1 ? row[x - 2u] : Wv; \
+        int NNv = y > 1 ? up2[x] : Nv; \
+        (void)Wv; \
+        (void)Nv; \
+        (void)NWv; \
+        (void)NEv; \
+        (void)WWv; \
+        (void)NNv; \
+        int prediction = (prediction_expression); \
+        int residual = 0; \
+        if (position == cursor.next && \
+            !sparse56_decode_event(&cursor, position, depth, half, \
+                                   &residual)) \
+            goto sparse56_corrupt; \
+        row[x] = (uint16_t)((prediction + residual) & maximum); \
+        ++x; \
+        ++position; \
+    } \
+} while (0)
+#define SPARSE56_WEST_RANGE() do { \
+    size_t span = end - x; \
+    if (cursor.next >= position + span) { \
+        uint16_t value = x ? row[x - 1u] : (y ? up[x] : (uint16_t)half); \
+        position += span; \
+        while (x < end) row[x++] = value; \
+    } else { \
+        SPARSE56_DECODE_RANGE(Wv); \
+    } \
+} while (0)
+#define SPARSE56_NORTH_RANGE() do { \
+    size_t span = end - x; \
+    if (cursor.next >= position + span) { \
+        if (y) memcpy(row + x, up + x, span * sizeof(*row)); \
+        else { \
+            uint16_t value = x ? row[x - 1u] : (uint16_t)half; \
+            for (uint32_t fill = x; fill < end; ++fill) row[fill] = value; \
+        } \
+        x = end; \
+        position += span; \
+    } else { \
+        SPARSE56_DECODE_RANGE(Nv); \
+    } \
+} while (0)
+#define SPARSE56_NORTHEAST_RANGE() do { \
+    size_t span = end - x; \
+    if (cursor.next >= position + span) { \
+        if (y) { \
+            size_t copied = x + span < width ? span : span - 1u; \
+            if (copied) \
+                memcpy(row + x, up + x + 1u, copied * sizeof(*row)); \
+            if (copied < span) row[x + copied] = up[x + copied]; \
+        } else { \
+            uint16_t value = x ? row[x - 1u] : (uint16_t)half; \
+            for (uint32_t fill = x; fill < end; ++fill) row[fill] = value; \
+        } \
+        x = end; \
+        position += span; \
+    } else { \
+        SPARSE56_DECODE_RANGE(NEv); \
+    } \
+} while (0)
+    for (uint32_t y = 0; y < height; ++y) {
+        uint16_t *row = plane + (size_t)y * width;
+        const uint16_t *up = y ? row - width : row;
+        const uint16_t *up2 = y > 1 ? up - width : up;
+        const uint8_t *tile_row =
+            map + (size_t)(y >> tile_log) * tiles_x;
+        uint32_t x = 0;
+        for (uint32_t tile = 0; tile < tiles_x; ++tile) {
+            uint32_t end = (tile + 1u) << tile_log;
+            if (end > width) end = width;
+            /* predictor choice stays outside the pixel loop because a tile only has one */
+            switch (tile_row[tile]) {
+            case 0: SPARSE56_DECODE_RANGE(
+                        predict(0, Wv, Nv, NWv, NEv, maximum)); break;
+            case 1: SPARSE56_DECODE_RANGE(paethp(Wv, Nv, NWv)); break;
+            case 2: SPARSE56_WEST_RANGE(); break;
+            case 3: SPARSE56_NORTH_RANGE(); break;
+            case 4: SPARSE56_DECODE_RANGE((Wv + Nv + 1) >> 1); break;
+            case 5: SPARSE56_DECODE_RANGE(
+                        clampi(Nv + Wv - NWv, 0, maximum)); break;
+            case 6: SPARSE56_NORTHEAST_RANGE(); break;
+            case 7: SPARSE56_DECODE_RANGE((Wv + NEv + 1) >> 1); break;
+            case 8: SPARSE56_DECODE_RANGE((Nv + NEv + 1) >> 1); break;
+            case 9: SPARSE56_DECODE_RANGE(
+                        clampi(2 * Wv - WWv, 0, maximum)); break;
+            case 10: SPARSE56_DECODE_RANGE(
+                         clampi(2 * Nv - NNv, 0, maximum)); break;
+            case 11: SPARSE56_DECODE_RANGE(
+                         clampi(Wv + (((Nv - NWv) * 3) >> 2),
+                                0, maximum)); break;
+            case 12: SPARSE56_DECODE_RANGE(
+                         clampi(Nv + (((Wv - NWv) * 3) >> 2),
+                                0, maximum)); break;
+            case 13: SPARSE56_DECODE_RANGE(
+                         gapp(Wv, Nv, NWv, NEv, WWv, NNv, maximum)); break;
+            case 14: SPARSE56_DECODE_RANGE(
+                         clampi((Wv + Nv + NEv + NWv + 2) >> 2,
+                                0, maximum)); break;
+            case 15: SPARSE56_DECODE_RANGE(
+                         clampi((5 * Wv + 2 * Nv - 3 * NWv + NEv + 2) >> 2,
+                                0, maximum)); break;
+            case 16: SPARSE56_DECODE_RANGE(
+                         clampi((Wv + 3 * Nv + 2) >> 2, 0, maximum)); break;
+            case 17: SPARSE56_DECODE_RANGE(
+                         clampi((3 * Wv + Nv + 2) >> 2, 0, maximum)); break;
+            case 18: SPARSE56_DECODE_RANGE(
+                         clampi((5 * Nv + 2 * Wv - 3 * NWv + NEv + 2) >> 2,
+                                0, maximum)); break;
+            case 19: SPARSE56_DECODE_RANGE(
+                         clampi((2 * Wv + Nv - NWv + 1) >> 1,
+                                0, maximum)); break;
+            case 20: SPARSE56_DECODE_RANGE(
+                         clampi((Wv + 2 * Nv - NWv + 1) >> 1,
+                                0, maximum)); break;
+            case 21: SPARSE56_DECODE_RANGE(
+                         clampi(Wv + ((NEv - NWv) >> 1), 0, maximum)); break;
+            case 22: SPARSE56_DECODE_RANGE(
+                         clampi(Nv + ((NEv - NWv) >> 1), 0, maximum)); break;
+            case 23: SPARSE56_DECODE_RANGE(
+                         clampi((Wv + Nv + NEv + 1) / 3, 0, maximum)); break;
+            case 24: SPARSE56_DECODE_RANGE(
+                         clampi((2 * Wv + Nv + NEv + 2) >> 2,
+                                0, maximum)); break;
+            case 25: SPARSE56_DECODE_RANGE(
+                         clampi((Wv + 2 * Nv + NWv + 2) >> 2,
+                                0, maximum)); break;
+            case 26: SPARSE56_DECODE_RANGE(
+                         clampi((3 * Wv + 3 * Nv - 2 * NWv + 2) >> 2,
+                                0, maximum)); break;
+            case 27: SPARSE56_DECODE_RANGE(
+                         clampi((4 * Nv + Wv - 2 * NWv + NEv + 2) >> 2,
+                                0, maximum)); break;
+            case 28: SPARSE56_DECODE_RANGE(
+                         clampi((4 * Wv + Nv - 2 * NWv + NEv + 2) >> 2,
+                                0, maximum)); break;
+            case 29: SPARSE56_DECODE_RANGE(
+                         clampi((Wv + Nv + NEv - NWv + 1) >> 1,
+                                0, maximum)); break;
+            case 30: SPARSE56_DECODE_RANGE(
+                         clampi((6 * Wv + 2 * Nv - 5 * NWv + NEv + 2) >> 2,
+                                0, maximum)); break;
+            default: SPARSE56_DECODE_RANGE(
+                         clampi((2 * Wv + 6 * Nv - 5 * NWv + NEv + 2) >> 2,
+                                0, maximum)); break;
+            }
+        }
+    }
+#undef SPARSE56_DECODE_RANGE
+#undef SPARSE56_WEST_RANGE
+#undef SPARSE56_NORTH_RANGE
+#undef SPARSE56_NORTHEAST_RANGE
+    int ok = !cursor.remaining && !decoder->truncated;
+    free(model);
+    free(map);
+    return ok ? STREAM_OK : STREAM_E_CORRUPT;
+sparse56_corrupt:
+#undef SPARSE56_DECODE_RANGE
+#undef SPARSE56_WEST_RANGE
+#undef SPARSE56_NORTH_RANGE
+#undef SPARSE56_NORTHEAST_RANGE
+    free(model);
+    free(map);
+    return STREAM_E_CORRUPT;
+}
+
+static int fast55_frequency(Fast55Buffer *buffer, uint16_t value) {
+    uint8_t bytes[2];
+    bytes[0] = (uint8_t)value;
+    if (value < 128u) return fast55_append(buffer, bytes, 1u);
+    bytes[0] |= 128u;
+    bytes[1] = (uint8_t)(value >> 7);
+    return fast55_append(buffer, bytes, 2u);
+}
+
+static int fast55_frequency_table(Fast55Buffer *buffer,
+                                  const uint16_t *frequencies,
+                                  int alphabet) {
+    int symbol = 0;
+    int stored = alphabet - 1;
+    while (symbol < stored) {
+        if (frequencies[symbol]) {
+            if (!fast55_frequency(buffer, frequencies[symbol])) return 0;
+            ++symbol;
+            continue;
+        }
+        int run = 1;
+        while (run < 255 && symbol + run < stored &&
+               !frequencies[symbol + run])
+            ++run;
+        uint8_t bytes[2] = {0, (uint8_t)run};
+        if (!fast55_append(buffer, bytes, sizeof(bytes))) return 0;
+        symbol += run;
+    }
+    return 1;
+}
+
+#define FAST55_FREQ_CONTEXTS 8
+#define FAST55_FREQ_BITS 14
+
+typedef struct {
+    Prob unary[FAST55_FREQ_CONTEXTS][FAST55_FREQ_BITS + 1];
+    Prob mantissa[FAST55_FREQ_CONTEXTS][FAST55_FREQ_BITS + 1]
+                 [FAST55_FREQ_BITS];
+} Fast55FrequencyModel;
+
+static QLIC_FORCEINLINE int fast55_frequency_context(int symbol) {
+    int context = nbits((unsigned)symbol);
+    return context < FAST55_FREQ_CONTEXTS ? context :
+                                            FAST55_FREQ_CONTEXTS - 1;
+}
+
+static void fast55_encode_frequency_value(Enc *encoder,
+                                          Fast55FrequencyModel *model,
+                                          int context, unsigned value) {
+    int bits = nbits(value);
+    for (int index = 0; index < bits; ++index)
+        enc_bit(encoder, &model->unary[context][index], 1);
+    if (bits < FAST55_FREQ_BITS)
+        enc_bit(encoder, &model->unary[context][bits], 0);
+    for (int index = bits - 2; index >= 0; --index)
+        enc_bit(encoder, &model->mantissa[context][bits][index],
+                (value >> index) & 1u);
+}
+
+static void fast55_encode_frequency_range(
+    Enc *encoder, Fast55FrequencyModel *model,
+    const uint16_t *frequencies, const uint16_t *previous, int alphabet) {
+    for (int symbol = 0; symbol < alphabet - 1; ++symbol) {
+        int prediction = previous ? previous[symbol] : 0;
+        int delta = (int)frequencies[symbol] - prediction;
+        unsigned value = delta < 0 ? (unsigned)(-2 * delta - 1) :
+                                     (unsigned)(2 * delta);
+        fast55_encode_frequency_value(
+            encoder, model, fast55_frequency_context(symbol), value);
+    }
+}
+
+static size_t fast55_pack_mapping(const uint8_t *mapping, uint8_t *packed,
+                                  size_t context_count) {
+    size_t input = 0;
+    size_t output = 0;
+    while (input < context_count) {
+        size_t run = 1;
+        if (!mapping[input]) {
+            while (run < 128u && input + run < context_count &&
+                   !mapping[input + run])
+                ++run;
+            packed[output++] = (uint8_t)(128u | (run - 1u));
+        } else {
+            while (run < 128u && input + run < context_count &&
+                   mapping[input + run])
+                ++run;
+            packed[output++] = (uint8_t)(run - 1u);
+            for (size_t index = 0; index < run; index += 2u) {
+                uint8_t value = mapping[input + index];
+                if (index + 1u < run)
+                    value |= (uint8_t)(mapping[input + index + 1u] << 4);
+                packed[output++] = value;
+            }
+        }
+        input += run;
+    }
+    return output;
+}
+
+static int fast55_encode_context_mapping(const uint8_t *mapping,
+                                         int cluster_count,
+                                         size_t context_count,
+                                         uint8_t **data, size_t *size) {
+    Enc encoder;
+    enc_init(&encoder, ADAPT_DEFAULT);
+    enc_reserve(&encoder, context_count);
+    Prob tree[64];
+    Prob same[5];
+    probabilities_init(tree, 64);
+    probabilities_init(same, 5);
+    for (size_t context = 0; context < context_count; ++context) {
+        size_t reference = 0;
+        int dimension = -1;
+        if (context % 12u) {
+            reference = context - 1u;
+            dimension = 0;
+        } else if ((context / 12u) % 6u) {
+            reference = context - 12u;
+            dimension = 1;
+        } else if ((context / 72u) % 4u) {
+            reference = context - 72u;
+            dimension = 2;
+        } else if ((context / 288u) % 3u) {
+            reference = context - 288u;
+            dimension = 3;
+        } else if (context >= 864u) {
+            reference = context - 864u;
+            dimension = 4;
+        }
+        if (dimension >= 0) {
+            int different = mapping[context] != mapping[reference];
+            enc_bit(&encoder, &same[dimension], different);
+            if (!different) continue;
+        }
+        if (cluster_count <= 16)
+            enc_tree4(&encoder, tree, mapping[context]);
+        else
+            enc_tree5(&encoder, tree, mapping[context]);
+    }
+    enc_flush(&encoder);
+    if (encoder.oom || encoder.cut) {
+        free(encoder.buf);
+        return 0;
+    }
+    *data = encoder.buf;
+    *size = encoder.len;
+    return 1;
+}
+
+static int fast55_encode_plane_mapping(
+    Fast55Buffer *output, const uint16_t *symbols, const uint16_t *contexts,
+    const uint8_t *regions, size_t events, const uint64_t *cluster_counts,
+    const uint64_t *tail_counts, int tail_alphabet,
+    const uint8_t mapping[FAST55_CONTEXTS_MAX], int cluster_count,
+    int context_count, int paired_context,
+    int region_count, int region_split,
+    const Fast55Buffer *run_stream, int use_runs, size_t pixels, int depth) {
+    Fast55Symbol *tail_symbols = malloc(
+        (size_t)tail_alphabet * sizeof(*tail_symbols));
+    uint16_t *tail_frequencies = malloc(
+        (size_t)tail_alphabet * sizeof(*tail_frequencies));
+    if (!tail_symbols || !tail_frequencies) {
+        free(tail_frequencies);
+        free(tail_symbols);
+        return STREAM_E_ALLOC;
+    }
+    Fast55Symbol primary_symbols[FAST55_REGIONS][FAST55_CLUSTERS]
+                                      [FAST55_PRIMARY];
+    uint16_t primary_frequencies[FAST55_REGIONS][FAST55_CLUSTERS]
+                                        [FAST55_PRIMARY];
+    for (int region = 0; region < region_count; ++region)
+        for (int cluster = 0; cluster < cluster_count; ++cluster)
+            fast55_normalize(
+                             cluster_counts +
+                                 ((size_t)region * (size_t)cluster_count +
+                                  (size_t)cluster) * FAST55_PRIMARY,
+                             FAST55_PRIMARY,
+                             primary_symbols[region][cluster],
+                             primary_frequencies[region][cluster]);
+    fast55_normalize(tail_counts, tail_alphabet, tail_symbols,
+                     tail_frequencies);
+    if (pixels > (SIZE_MAX - 64u) / 5u) {
+        free(tail_frequencies);
+        free(tail_symbols);
+        return STREAM_E_DIM;
+    }
+    size_t scratch_size = pixels * 5u + 64u;
+    uint8_t *scratch = malloc(scratch_size);
+    if (!scratch) {
+        free(tail_frequencies);
+        free(tail_symbols);
+        return STREAM_E_ALLOC;
+    }
+    uint8_t *cursor = scratch + scratch_size;
+    uint32_t states[FAST55_LANES];
+    for (int lane = 0; lane < FAST55_LANES; ++lane)
+        states[lane] = FAST55_RANS_L;
+    for (size_t event = events; event-- > 0;) {
+        unsigned symbol = symbols[event];
+        uint32_t *state = &states[event & (FAST55_LANES - 1u)];
+        int cluster = mapping[contexts[event]];
+        int region = region_count == 1 ? 0 : regions[event] >= region_split;
+        if (symbol >= FAST55_DIRECT && symbol != UINT16_MAX)
+            fast55_rans_put(state, tail_symbols[symbol - FAST55_DIRECT],
+                            &cursor);
+        unsigned primary = symbol == UINT16_MAX
+                               ? FAST55_RUN
+                               : symbol < FAST55_DIRECT ? symbol
+                                                        : FAST55_ESCAPE;
+        fast55_rans_put(state, primary_symbols[region][cluster][primary],
+                        &cursor);
+    }
+    Fast55Buffer frequency_bytes = {0};
+    frequency_bytes.limit = SIZE_MAX;
+    int frequency_ok = 1;
+    for (int region = 0; region < region_count && frequency_ok; ++region)
+        for (int cluster = 0; cluster < cluster_count && frequency_ok;
+             ++cluster)
+            frequency_ok = fast55_frequency_table(
+                &frequency_bytes, primary_frequencies[region][cluster],
+                FAST55_PRIMARY);
+    if (frequency_ok)
+        frequency_ok = fast55_frequency_table(
+            &frequency_bytes, tail_frequencies, tail_alphabet);
+    Enc frequency_encoder;
+    enc_init(&frequency_encoder, ADAPT_DEFAULT);
+    enc_reserve(&frequency_encoder, frequency_bytes.size + 64u);
+    Fast55FrequencyModel frequency_model;
+    probabilities_init((Prob *)&frequency_model,
+                       sizeof(frequency_model) / sizeof(Prob));
+    const uint16_t *previous_frequencies = NULL;
+    for (int region = 0; region < region_count; ++region)
+        for (int cluster = 0; cluster < cluster_count; ++cluster) {
+            fast55_encode_frequency_range(
+                &frequency_encoder, &frequency_model,
+                primary_frequencies[region][cluster], previous_frequencies,
+                FAST55_PRIMARY);
+            previous_frequencies = primary_frequencies[region][cluster];
+        }
+    fast55_encode_frequency_range(
+        &frequency_encoder, &frequency_model, tail_frequencies, NULL,
+        tail_alphabet);
+    enc_flush(&frequency_encoder);
+    int range_frequencies = !frequency_encoder.oom &&
+                            !frequency_encoder.cut &&
+                            frequency_encoder.len + 4u <
+                                frequency_bytes.size;
+    Fast55Buffer block = {0};
+    block.limit = output->limit - output->size;
+    uint8_t packed_mapping[FAST55_CONTEXTS_MAX];
+    size_t packed_mapping_size = cluster_count <= 16
+                                     ? fast55_pack_mapping(
+                                           mapping, packed_mapping,
+                                           (size_t)context_count)
+                                     : SIZE_MAX;
+    uint8_t *context_mapping = NULL;
+    size_t context_mapping_size = 0;
+    int context_mapping_ok = fast55_encode_context_mapping(
+        mapping, cluster_count, (size_t)context_count, &context_mapping,
+        &context_mapping_size);
+    size_t mapping_size = cluster_count <= 16
+                              ? (size_t)context_count / 2u : SIZE_MAX;
+    int mapping_method = cluster_count <= 16 ? 0 : 2;
+    if (cluster_count <= 16 && packed_mapping_size < mapping_size) {
+        mapping_size = packed_mapping_size;
+        mapping_method = 1;
+    }
+    if (context_mapping_ok && context_mapping_size + 4u < mapping_size) {
+        mapping_method = 2;
+    }
+    uint8_t header[8] = {'R','5', region_count == 1 ? '5' : '7','P',
+                         (uint8_t)depth,
+                         (uint8_t)cluster_count,
+                         (uint8_t)mapping_method,
+                         (uint8_t)(use_runs | (range_frequencies ? 2 : 0) |
+                                    ((region_count - 1) << 2) |
+                                     (region_split == 1 ? 8 : 0) |
+                                     FAST55_SIMPLE_CONTEXT_FLAG |
+                                     (paired_context
+                                          ? FAST55_PAIRED_CONTEXT_FLAG
+                                          : 0))};
+    int ok = frequency_ok &&
+             (context_mapping_ok || cluster_count <= 16);
+    if (ok) ok = fast55_append(&block, header, sizeof(header));
+    if (mapping_method == 2) {
+        if (context_mapping_size > UINT32_MAX) ok = 0;
+        if (ok) ok = fast55_u32(&block, (uint32_t)context_mapping_size) &&
+                     fast55_append(&block, context_mapping,
+                                   context_mapping_size);
+    } else if (mapping_method == 1) {
+        if (ok) ok = fast55_append(&block, packed_mapping,
+                                   packed_mapping_size);
+    } else {
+        for (int context = 0; context < context_count && ok;
+             context += 2) {
+            uint8_t value = (uint8_t)(mapping[context] |
+                                      (mapping[context + 1] << 4));
+            ok = fast55_append(&block, &value, 1);
+        }
+    }
+    if (range_frequencies) {
+        if (frequency_encoder.len > UINT32_MAX) ok = 0;
+        if (ok) ok = fast55_u32(&block, (uint32_t)frequency_encoder.len) &&
+                     fast55_append(&block, frequency_encoder.buf,
+                                   frequency_encoder.len);
+    } else if (ok) {
+        ok = fast55_append(&block, frequency_bytes.data,
+                           frequency_bytes.size);
+    }
+    if (run_stream->size > UINT32_MAX) ok = 0;
+    if (ok) ok = fast55_u32(&block, (uint32_t)run_stream->size) &&
+                 fast55_append(&block, run_stream->data, run_stream->size);
+    size_t ans_bytes = (size_t)(scratch + scratch_size - cursor) +
+                       FAST55_LANES * sizeof(uint32_t);
+    if (ans_bytes > UINT32_MAX) ok = 0;
+    if (ok) ok = fast55_u32(&block, (uint32_t)ans_bytes);
+    for (int lane = 0; lane < FAST55_LANES && ok; ++lane)
+        ok = fast55_u32(&block, states[lane]);
+    if (ok) ok = fast55_append(
+        &block, cursor, ans_bytes - FAST55_LANES * sizeof(uint32_t));
+    if (ok && block.size <= UINT32_MAX)
+        ok = fast55_u32(output, (uint32_t)block.size) &&
+             fast55_append(output, block.data, block.size);
+    free(context_mapping);
+    free(frequency_encoder.buf);
+    free(frequency_bytes.data);
+    free(block.data);
+    free(scratch);
+    free(tail_frequencies);
+    free(tail_symbols);
+    return ok ? STREAM_OK : STREAM_E_FORMAT;
+}
+
+static int fast55_encode_plane(Fast55Buffer *output, const uint16_t *plane,
+                               const uint8_t *map, uint32_t width,
+                               uint32_t height, int depth, int tile_log,
+                               uint8_t *state_out, const uint8_t *state_in) {
+    size_t pixels = (size_t)width * height;
+    int paired_context = state_in != NULL;
+    int paired_final = paired_context && !state_out;
+    int context_count = paired_final ? FAST55_PAIRED_CONTEXTS
+                                     : FAST55_BASE_CONTEXTS;
+    if (pixels > SIZE_MAX / (sizeof(uint16_t) * 2u)) return STREAM_E_DIM;
+    uint16_t *storage = malloc(pixels * sizeof(uint16_t) * 2u);
+    uint8_t *regions = malloc(pixels);
+    uint8_t *up_error = calloc(width, 1u);
+    uint32_t *histogram = calloc(
+        (size_t)context_count * FAST55_PRIMARY, sizeof(uint32_t));
+    if (!storage || !regions || !up_error || !histogram) {
+        free(histogram);
+        free(up_error);
+        free(regions);
+        free(storage);
+        return STREAM_E_ALLOC;
+    }
+    uint16_t *symbols = storage;
+    uint16_t *contexts = storage + pixels;
+    uint32_t w = width;
+    int half = 1 << (depth - 1);
+    int maximum = (1 << depth) - 1;
+    uint32_t tiles_x = (width + (1u << tile_log) - 1u) >> tile_log;
+    size_t zero_run = 0;
+    size_t run_samples = 0;
+    for (uint32_t y = 0; y < height; ++y) {
+        const uint16_t *row = plane + (size_t)y * width;
+        const uint16_t *up = y ? row - width : row;
+        const uint16_t *up2 = y > 1 ? up - width : up;
+        uint8_t left_error = 0;
+        for (uint32_t x = 0; x < width; ++x) {
+            int Wv, Nv, NWv, NEv; NEIGHBORS();
+            int WWv = x > 1 ? row[x - 2u] : Wv;
+            int NNv = y > 1 ? up2[x] : Nv;
+            int predictor = map[(size_t)(y >> tile_log) * tiles_x +
+                                (x >> tile_log)];
+            int prediction = predicta_impl(predictor, Wv, Nv, NWv,
+                                           NEv, WWv, NNv, maximum);
+            int error = ((row[x] - prediction + half) & maximum) - half;
+            unsigned symbol = error < 0 ? (unsigned)(-2 * error - 1) :
+                                          (unsigned)(2 * error);
+            if (!symbol) {
+                ++zero_run;
+            } else {
+                if (zero_run >= FAST55_RUN_MIN) run_samples += zero_run;
+                zero_run = 0;
+            }
+            size_t index = (size_t)y * width + x;
+            int channel_context = state_in ? state_in[index] : 0;
+            int cross = channel_context;
+            if (paired_final) {
+                int current = channel_context & 15;
+                int previous = channel_context >> 4;
+                cross = current ? current : previous ? previous + 4 : 0;
+            }
+            int activity;
+            int reference = fast55_activity_hint_reference(
+                Wv, Nv, NWv, NEv, WWv, NNv, &activity);
+            int hint = predictor == 13 ? 1 :
+                       (reference > prediction) - (reference < prediction) + 1;
+            int context = fast55_activity(activity) +
+                          12 * fast55_error_state(
+                              left_error, up_error[x]) +
+                          decode_predictor_context[predictor] +
+                          288 * hint + 864 * cross;
+            symbols[index] = (uint16_t)symbol;
+            contexts[index] = (uint16_t)context;
+            if (state_out) {
+                uint8_t next = fast55_channel_state(symbol);
+                if (state_out == state_in)
+                    next = (uint8_t)((channel_context << 4) | next);
+                state_out[index] = next;
+            }
+            left_error = fast55_residual_lut[symbol].error_state;
+            up_error[x] = left_error;
+        }
+    }
+    if (zero_run >= FAST55_RUN_MIN) run_samples += zero_run;
+
+    Fast55Buffer run_stream = {0};
+    run_stream.limit = SIZE_MAX;
+    int use_runs = run_samples > pixels / 2u;
+    int tail_alphabet = (1 << depth) - FAST55_DIRECT;
+    uint64_t tail_counts[512] = {0};
+    size_t events = 0;
+    for (size_t input = 0; input < pixels;) {
+        if (use_runs && !symbols[input]) {
+            size_t end = input + 1u;
+            while (end < pixels && !symbols[end]) ++end;
+            size_t run = end - input;
+            if (run >= FAST55_RUN_MIN) {
+                symbols[events] = UINT16_MAX;
+                contexts[events] = contexts[input];
+                regions[events] = (uint8_t)(
+                    (uint64_t)(input / width) * 4u / height);
+                if (run > UINT32_MAX ||
+                    !fast55_uint(&run_stream,
+                                 (uint32_t)run - FAST55_RUN_MIN)) {
+                    free(run_stream.data);
+                    free(histogram);
+                    free(up_error);
+                    free(regions);
+                    free(storage);
+                    return STREAM_E_ALLOC;
+                }
+                ++events;
+                input = end;
+                continue;
+            }
+        }
+        symbols[events] = symbols[input];
+        contexts[events] = contexts[input];
+        regions[events] = (uint8_t)(
+            (uint64_t)(input / width) * 4u / height);
+        if (symbols[events] >= FAST55_DIRECT) {
+            unsigned tail = symbols[events] - FAST55_DIRECT;
+            ++tail_counts[tail];
+        }
+        ++events;
+        ++input;
+    }
+    for (size_t event = 0; event < events; ++event) {
+        unsigned primary = symbols[event] == UINT16_MAX
+                               ? FAST55_RUN
+                               : symbols[event] < FAST55_DIRECT
+                                     ? symbols[event] : FAST55_ESCAPE;
+        size_t offset = (size_t)contexts[event] * FAST55_PRIMARY + primary;
+        ++histogram[offset];
+    }
+
+    uint8_t mapping[FAST55_CONTEXTS_MAX];
+    int cluster_count = FAST55_CLUSTERS;
+    fast55_cluster(histogram, mapping, cluster_count, context_count);
+    fast55_refine_normalized(histogram, mapping, cluster_count,
+                             context_count);
+    size_t cluster_stride =
+        (size_t)cluster_count * FAST55_PRIMARY;
+    uint64_t *cluster_storage = calloc(
+        7u * cluster_stride, sizeof(*cluster_storage));
+    if (!cluster_storage) {
+        free(run_stream.data);
+        free(histogram);
+        free(up_error);
+        free(regions);
+        free(storage);
+        return STREAM_E_ALLOC;
+    }
+    uint64_t *global_counts = cluster_storage;
+    uint64_t *quarter_counts = global_counts + cluster_stride;
+    uint64_t *regional_counts = quarter_counts + 4u * cluster_stride;
+    for (size_t event = 0; event < events; ++event) {
+        unsigned primary = symbols[event] == UINT16_MAX
+                               ? FAST55_RUN
+                               : symbols[event] < FAST55_DIRECT
+                                     ? symbols[event] : FAST55_ESCAPE;
+        size_t offset =
+            (size_t)mapping[contexts[event]] * FAST55_PRIMARY + primary;
+        ++global_counts[offset];
+        ++quarter_counts[(size_t)regions[event] * cluster_stride + offset];
+    }
+    uint64_t half_cost;
+    uint64_t quarter_cost;
+    fast55_partition_costs(quarter_counts, cluster_count,
+                           &half_cost, &quarter_cost);
+    int region_split = quarter_cost < half_cost ? 1 : 2;
+    for (int source_region = 0; source_region < 4; ++source_region) {
+        int region = source_region >= region_split;
+        uint64_t *destination =
+            regional_counts + (size_t)region * cluster_stride;
+        const uint64_t *source =
+            quarter_counts + (size_t)source_region * cluster_stride;
+        for (size_t entry = 0; entry < cluster_stride; ++entry)
+            destination[entry] += source[entry];
+    }
+    size_t remaining = output->limit - output->size;
+    Fast55Buffer global_output = {0};
+    Fast55Buffer regional_output = {0};
+    global_output.limit = remaining;
+    regional_output.limit = remaining;
+    int result = fast55_encode_plane_mapping(
+        &global_output, symbols, contexts, regions, events, global_counts,
+        tail_counts, tail_alphabet, mapping, cluster_count, context_count,
+        paired_context, 1, 0, &run_stream, use_runs, pixels, depth);
+    int regional_result = fast55_encode_plane_mapping(
+        &regional_output, symbols, contexts, regions, events,
+        regional_counts, tail_counts, tail_alphabet, mapping,
+        cluster_count, context_count, paired_context, 2, region_split,
+        &run_stream,
+        use_runs, pixels, depth);
+    Fast55Buffer *selected = &global_output;
+    if (regional_result == STREAM_OK &&
+        (result != STREAM_OK || regional_output.size < selected->size)) {
+        selected = &regional_output;
+        result = STREAM_OK;
+    }
+    if (result == STREAM_OK &&
+        !fast55_append(output, selected->data, selected->size))
+        result = STREAM_E_FORMAT;
+    free(regional_output.data);
+    free(global_output.data);
+    free(cluster_storage);
+    free(run_stream.data);
+    free(histogram);
+    free(up_error);
+    free(regions);
+    free(storage);
+    return result;
+}
+
+static int fast55_stream_encode(const EncCtx *context, int transform,
+                                int tile_log, size_t limit, uint8_t **out,
+                                size_t *out_size) {
+    if (context->ch != 3 || context->gray || !tile_log)
+        return STREAM_E_FORMAT;
+    model_ensure();
+    size_t pixels = (size_t)context->w * context->h;
+    uint16_t *owned_planes = NULL;
+    uint16_t *planes[3];
+    int error;
+    if (context->transform_plane_cache) {
+        error = cached_transform_planes(context, transform, planes);
+        if (error != STREAM_OK) return error;
+    } else {
+        if (pixels > SIZE_MAX / (6u * sizeof(uint8_t))) return STREAM_E_DIM;
+        owned_planes = malloc(pixels * 3u * sizeof(uint16_t));
+        if (!owned_planes) return STREAM_E_ALLOC;
+        planes[0] = owned_planes;
+        planes[1] = owned_planes + pixels;
+        planes[2] = owned_planes + pixels * 2u;
+        fwd_transform(context->pix, pixels, (int)context->stride, transform,
+                      planes);
+    }
+    int depth[3] = {8, transform ? 9 : 8, transform ? 9 : 8};
+    int map_kind = (transform != 5 || tile_log != 3)
+                       ? MAP37_REUSE_PENALTY : 0;
+    if (transform == 35) map_kind = 4;
+    const uint8_t *maps[3] = {0};
+    uint8_t *owned_maps[3] = {0};
+    uint32_t tiles_x = (context->w + (1u << tile_log) - 1u) >> tile_log;
+    uint32_t tiles_y = (context->h + (1u << tile_log) - 1u) >> tile_log;
+    size_t tiles = (size_t)tiles_x * tiles_y;
+    for (int plane = 0; plane < 3; ++plane) {
+        error = cached_map37(context, transform, tile_log, plane,
+                             planes[plane], depth[plane], map_kind,
+                             &maps[plane]);
+        if (error != STREAM_OK) break;
+        if (!maps[plane]) {
+            error = predictor_map37(planes[plane], context->w, context->h,
+                                    depth[plane], tile_log, map_kind, 0,
+                                    &owned_maps[plane], NULL, NULL);
+            maps[plane] = owned_maps[plane];
+            if (error != STREAM_OK) break;
+        }
+    }
+    if (error != STREAM_OK) {
+        for (int plane = 0; plane < 3; ++plane) free(owned_maps[plane]);
+        free(owned_planes);
+        return error;
+    }
+
+    Enc map_encoder;
+    enc_init(&map_encoder, ADAPT_DEFAULT);
+    map_encoder.max = limit;
+    enc_reserve(&map_encoder, tiles * 2u + 64u);
+    for (int plane = 0; plane < 3 && !map_encoder.cut; ++plane)
+        fast55_encode_map(&map_encoder, maps[plane], tiles, tiles_x);
+    enc_flush(&map_encoder);
+    if (map_encoder.oom || map_encoder.cut || map_encoder.len > UINT32_MAX) {
+        for (int plane = 0; plane < 3; ++plane) free(owned_maps[plane]);
+        free(owned_planes);
+        free(map_encoder.buf);
+        return map_encoder.oom ? STREAM_E_ALLOC : STREAM_E_FORMAT;
+    }
+
+    Fast55Buffer output = {0};
+    output.limit = limit;
+    uint8_t native_header[STREAM_HDR] = {0};
+    int ok = fast55_append(&output, native_header, sizeof(native_header)) &&
+             fast55_append(&output, "Q55A", 4) &&
+             fast55_u32(&output, (uint32_t)map_encoder.len) &&
+             fast55_append(&output, map_encoder.buf, map_encoder.len);
+    uint8_t *state = ok ? malloc(pixels) : NULL;
+    if (ok && !state) {
+        ok = 0;
+        error = STREAM_E_ALLOC;
+    }
+    if (ok) {
+        error = fast55_encode_plane(&output, planes[0], maps[0], context->w,
+                                    context->h, depth[0], tile_log, state,
+                                    NULL);
+        if (error == STREAM_OK)
+            error = fast55_encode_plane(&output, planes[1], maps[1],
+                                        context->w, context->h, depth[1],
+                                        tile_log, state, state);
+        if (error == STREAM_OK)
+            error = fast55_encode_plane(&output, planes[2], maps[2],
+                                        context->w, context->h, depth[2],
+                                        tile_log, NULL, state);
+        ok = error == STREAM_OK;
+    }
+    free(state);
+    free(map_encoder.buf);
+    for (int plane = 0; plane < 3; ++plane) free(owned_maps[plane]);
+    free(owned_planes);
+    if (!ok) {
+        free(output.data);
+        return error == STREAM_E_ALLOC ? error : STREAM_E_FORMAT;
+    }
+    if (output.size < STREAM_HDR || output.size - STREAM_HDR > UINT32_MAX) {
+        free(output.data);
+        return STREAM_E_DIM;
+    }
+    uint8_t *header = output.data;
+    memcpy(header, "QST1", 4);
+    put32(header + 4, context->w);
+    put32(header + 8, context->h);
+    header[12] = 3;
+    header[13] = 0;
+    header[14] = 55;
+    header[15] = (uint8_t)transform;
+    header[16] = (uint8_t)tile_log;
+    header[17] = 0;
+    put32(header + 18, context->crc);
+    put32(header + 22, (uint32_t)(output.size - STREAM_HDR));
+    put32(header + 26, 0);
+    put32(header + 26, container_crc32(header, output.size));
+    *out = output.data;
+    *out_size = output.size;
+    return STREAM_OK;
+}
+
+typedef struct {
+    uint16_t symbol;
+    uint16_t start;
+    uint16_t frequency;
+} Fast55DecodeEntry;
+
+typedef struct {
+    const uint8_t *cursor;
+    const uint8_t *end;
+} Fast55Reader;
+
+static int fast55_read(Fast55Reader *reader, void *destination, size_t size) {
+    if (size > (size_t)(reader->end - reader->cursor)) return 0;
+    memcpy(destination, reader->cursor, size);
+    reader->cursor += size;
+    return 1;
+}
+
+static int fast55_read_mapping(Fast55Reader *reader, int packed,
+                               int cluster_count, size_t context_count,
+                               uint8_t *mapping) {
+    if (packed == 2) {
+        uint8_t bytes[4];
+        if (!fast55_read(reader, bytes, sizeof(bytes))) return 0;
+        uint32_t size = get32(bytes);
+        if (size > (size_t)(reader->end - reader->cursor)) return 0;
+        Dec decoder;
+        dec_init(&decoder, reader->cursor, size, ADAPT_DEFAULT);
+        reader->cursor += size;
+        Prob tree[64];
+        Prob same[5];
+        probabilities_init(tree, 64);
+        probabilities_init(same, 5);
+        for (size_t context = 0; context < context_count; ++context) {
+            size_t reference = 0;
+            int dimension = -1;
+            if (context % 12u) {
+                reference = context - 1u;
+                dimension = 0;
+            } else if ((context / 12u) % 6u) {
+                reference = context - 12u;
+                dimension = 1;
+            } else if ((context / 72u) % 4u) {
+                reference = context - 72u;
+                dimension = 2;
+            } else if ((context / 288u) % 3u) {
+                reference = context - 288u;
+                dimension = 3;
+            } else if (context >= 864u) {
+                reference = context - 864u;
+                dimension = 4;
+            }
+            if (dimension >= 0 &&
+                !dec_bit(&decoder, &same[dimension])) {
+                mapping[context] = mapping[reference];
+                continue;
+            }
+            mapping[context] = (uint8_t)(
+                cluster_count <= 16 ? dec_tree4(&decoder, tree) :
+                                      dec_tree5(&decoder, tree));
+        }
+        return !decoder.truncated;
+    }
+    if (cluster_count > 16) return 0;
+    if (!packed) {
+        for (size_t context = 0; context < context_count; context += 2) {
+            uint8_t value;
+            if (!fast55_read(reader, &value, 1u)) return 0;
+            mapping[context] = value & 15u;
+            mapping[context + 1] = value >> 4;
+        }
+        return 1;
+    }
+    size_t context = 0;
+    while (context < context_count) {
+        uint8_t token;
+        if (!fast55_read(reader, &token, 1u)) return 0;
+        size_t run = (token & 127u) + 1u;
+        if (run > context_count - context) return 0;
+        if (token & 128u) {
+            memset(mapping + context, 0, run);
+        } else {
+            for (size_t index = 0; index < run; index += 2u) {
+                uint8_t value;
+                if (!fast55_read(reader, &value, 1u)) return 0;
+                mapping[context + index] = value & 15u;
+                if (index + 1u < run)
+                    mapping[context + index + 1u] = value >> 4;
+            }
+        }
+        context += run;
+    }
+    return 1;
+}
+
+static int fast55_read_u32(Fast55Reader *reader, uint32_t *value) {
+    uint8_t bytes[4];
+    if (!fast55_read(reader, bytes, sizeof(bytes))) return 0;
+    *value = get32(bytes);
+    return 1;
+}
+
+static int fast55_read_uint(Fast55Reader *reader, uint32_t *value) {
+    uint32_t result = 0;
+    for (unsigned shift = 0; shift < 35u; shift += 7u) {
+        uint8_t byte;
+        if (!fast55_read(reader, &byte, 1u) ||
+            (shift == 28u && (byte & 240u)))
+            return 0;
+        result |= (uint32_t)(byte & 127u) << shift;
+        if (!(byte & 128u)) {
+            *value = result;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int fast55_decode_frequency_value(Dec *decoder,
+                                         Fast55FrequencyModel *model,
+                                         int context, unsigned *value) {
+    int bits = 0;
+    while (bits < FAST55_FREQ_BITS &&
+           dec_bit(decoder, &model->unary[context][bits]))
+        ++bits;
+    unsigned result = bits ? 1u << (bits - 1) : 0u;
+    for (int index = bits - 2; index >= 0; --index)
+        result |= (unsigned)dec_bit(
+                      decoder, &model->mantissa[context][bits][index])
+                  << index;
+    *value = result;
+    return !decoder->truncated;
+}
+
+static int fast55_decode_frequency_range(
+    Dec *decoder, Fast55FrequencyModel *model, uint16_t *frequencies,
+    const uint16_t *previous, int alphabet) {
+    unsigned remaining = FAST55_SCALE;
+    for (int symbol = 0; symbol < alphabet - 1; ++symbol) {
+        unsigned value;
+        if (!fast55_decode_frequency_value(
+                decoder, model, fast55_frequency_context(symbol), &value))
+            return 0;
+        int prediction = previous ? previous[symbol] : 0;
+        int delta = value & 1u ? -(int)((value + 1u) >> 1) :
+                                (int)(value >> 1);
+        int frequency = prediction + delta;
+        if (frequency < 0 || (unsigned)frequency > remaining) return 0;
+        frequencies[symbol] = (uint16_t)frequency;
+        remaining -= (unsigned)frequency;
+    }
+    frequencies[alphabet - 1] = (uint16_t)remaining;
+    return 1;
+}
+
+static int fast55_fill_decode_table(const uint16_t *frequencies,
+                                    int alphabet,
+                                    Fast55DecodeEntry *table) {
+    unsigned start = 0;
+    for (int symbol = 0; symbol < alphabet; ++symbol) {
+        unsigned frequency = frequencies[symbol];
+        if (frequency > FAST55_SCALE - start) return 0;
+        for (unsigned slot = 0; slot < frequency; ++slot) {
+            Fast55DecodeEntry *entry = table + start + slot;
+            entry->symbol = (uint16_t)symbol;
+            entry->start = (uint16_t)start;
+            entry->frequency = (uint16_t)frequency;
+        }
+        start += frequency;
+    }
+    return start == FAST55_SCALE;
+}
+
+static int fast55_fill_primary_decode_table(
+    const uint16_t *frequencies, int alphabet, uint8_t *table,
+    Fast55Symbol *symbols) {
+    unsigned start = 0;
+    for (int symbol = 0; symbol < alphabet; ++symbol) {
+        unsigned frequency = frequencies[symbol];
+        if (frequency > FAST55_SCALE - start) return 0;
+        symbols[symbol].start = (uint16_t)start;
+        symbols[symbol].frequency = (uint16_t)frequency;
+        memset(table + start, symbol, frequency);
+        start += frequency;
+    }
+    return start == FAST55_SCALE;
+}
+
+static int fast55_read_frequency_table(Fast55Reader *reader, int alphabet,
+                                       uint16_t *frequencies) {
+    unsigned start = 0;
+    int zero_run = 0;
+    for (int symbol = 0; symbol < alphabet; ++symbol) {
+        uint16_t frequency = 0;
+        if (symbol == alphabet - 1) {
+            frequency = (uint16_t)(FAST55_SCALE - start);
+        } else if (zero_run) {
+            --zero_run;
+        } else {
+            uint8_t first;
+            if (!fast55_read(reader, &first, 1u)) return 0;
+            if (!first) {
+                uint8_t run;
+                if (!fast55_read(reader, &run, 1u) || !run ||
+                    run > alphabet - 1 - symbol)
+                    return 0;
+                zero_run = run - 1;
+            } else if (first & 128u) {
+                uint8_t second;
+                if (!fast55_read(reader, &second, 1u) ||
+                    second > (FAST55_SCALE >> 7))
+                    return 0;
+                frequency = (uint16_t)((first & 127u) |
+                                       ((unsigned)second << 7));
+            } else {
+                frequency = first;
+            }
+            if (frequency > FAST55_SCALE - start) return 0;
+        }
+        frequencies[symbol] = frequency;
+        start += frequency;
+    }
+    return start == FAST55_SCALE;
+}
+
+static QLIC_FORCEINLINE int fast55_rans_get(
+    uint32_t *state, const Fast55DecodeEntry *table,
+    const uint8_t **cursor, const uint8_t *end, unsigned *symbol) {
+    unsigned slot = *state & (FAST55_SCALE - 1u);
+    Fast55DecodeEntry entry = table[slot];
+    *symbol = entry.symbol;
+    *state = (uint32_t)entry.frequency * (*state >> FAST55_SCALE_BITS) +
+             slot - entry.start;
+    while (*state < FAST55_RANS_L) {
+        if (*cursor >= end) return 0;
+        *state = (*state << 8) | *(*cursor)++;
+    }
+    return 1;
+}
+
+static QLIC_FORCEINLINE int fast55_rans_get_primary(
+    uint32_t *state, const uint8_t *table, const Fast55Symbol *symbols,
+    const uint8_t **cursor, const uint8_t *end, unsigned *symbol) {
+    unsigned slot = *state & (FAST55_SCALE - 1u);
+    *symbol = table[slot];
+    Fast55Symbol entry = symbols[*symbol];
+    *state = (uint32_t)entry.frequency * (*state >> FAST55_SCALE_BITS) +
+             slot - entry.start;
+    while (*state < FAST55_RANS_L) {
+        if (*cursor >= end) return 0;
+        *state = (*state << 8) | *(*cursor)++;
+    }
+    return 1;
+}
+
+static int fast55_decode_plane(const uint8_t *data, size_t size,
+                               uint16_t *plane, const uint8_t *map,
+                               uint32_t width, uint32_t height, int depth,
+                               int tile_log, uint8_t *state_out,
+                               const uint8_t *state_in) {
+    Fast55Reader reader = {data, data + size};
+    uint8_t header[8];
+    if (!fast55_read(&reader, header, sizeof(header)))
+        return STREAM_E_CORRUPT;
+    int regional = !memcmp(header, "R57P", 4);
+    int simple_context = !!(header[7] & FAST55_SIMPLE_CONTEXT_FLAG);
+    int paired_context = !!(header[7] & FAST55_PAIRED_CONTEXT_FLAG);
+    if ((!regional && memcmp(header, "R55P", 4)) || header[4] != depth ||
+        !header[5] || header[5] > FAST55_CLUSTERS || header[6] > 2u ||
+        (regional && !(header[7] & 4u)) ||
+        (regional ? (header[7] & ~63u) : (header[7] & ~51u)))
+        return STREAM_E_CORRUPT;
+    int cluster_count = header[5];
+    int region_count = regional ? 2 : 1;
+    int region_split = regional && (header[7] & 8u) ? 1 : 2;
+    int paired_final = paired_context && state_in && !state_out;
+    int context_count = paired_final ? FAST55_PAIRED_CONTEXTS
+                                     : FAST55_BASE_CONTEXTS;
+    if (region_count > FAST55_REGIONS) return STREAM_E_CORRUPT;
+    int use_runs = header[7] & 1u;
+    int range_frequencies = header[7] & 2u;
+    uint8_t mapping[FAST55_CONTEXTS_MAX];
+    if (!fast55_read_mapping(&reader, header[6], cluster_count,
+                             (size_t)context_count, mapping))
+        return STREAM_E_CORRUPT;
+    for (int context = 0; context < context_count; ++context)
+        if (mapping[context] >= cluster_count)
+            return STREAM_E_CORRUPT;
+    size_t primary_entries =
+        (size_t)region_count * (size_t)cluster_count * FAST55_SCALE;
+    size_t primary_symbol_entries =
+        (size_t)region_count * (size_t)cluster_count * FAST55_PRIMARY;
+    int tail_alphabet = (1 << depth) - FAST55_DIRECT;
+    size_t primary_bytes = primary_entries * sizeof(uint8_t);
+    size_t primary_symbol_bytes =
+        primary_symbol_entries * sizeof(Fast55Symbol);
+    size_t table_bytes = primary_bytes + primary_symbol_bytes +
+                          FAST55_SCALE * sizeof(Fast55DecodeEntry);
+    uint8_t *table_storage = malloc(table_bytes);
+    uint8_t *tables = table_storage;
+    Fast55Symbol *primary_symbols =
+        (Fast55Symbol *)(table_storage + primary_bytes);
+    Fast55DecodeEntry *tail_table =
+        (Fast55DecodeEntry *)(table_storage + primary_bytes +
+                              primary_symbol_bytes);
+    uint8_t *up_error = calloc(width, 1u);
+    if (!table_storage || !up_error) {
+        free(up_error); free(table_storage);
+        return STREAM_E_ALLOC;
+    }
+    if (range_frequencies) {
+        uint32_t frequency_size;
+        if (!fast55_read_u32(&reader, &frequency_size) ||
+            frequency_size > (size_t)(reader.end - reader.cursor)) {
+            free(up_error); free(table_storage);
+            return STREAM_E_CORRUPT;
+        }
+        Dec frequency_decoder;
+        dec_init(&frequency_decoder, reader.cursor, frequency_size,
+                 ADAPT_DEFAULT);
+        reader.cursor += frequency_size;
+        Fast55FrequencyModel frequency_model;
+        probabilities_init((Prob *)&frequency_model,
+                           sizeof(frequency_model) / sizeof(Prob));
+        uint16_t previous[FAST55_PRIMARY];
+        uint16_t current[FAST55_PRIMARY];
+        const uint16_t *previous_table = NULL;
+        for (int region = 0; region < region_count; ++region) {
+            for (int cluster = 0; cluster < cluster_count; ++cluster) {
+                if (!fast55_decode_frequency_range(
+                        &frequency_decoder, &frequency_model, current,
+                        previous_table, FAST55_PRIMARY) ||
+                    !fast55_fill_primary_decode_table(
+                        current, FAST55_PRIMARY,
+                        tables + ((size_t)region * (size_t)cluster_count +
+                                  (size_t)cluster) * FAST55_SCALE,
+                        primary_symbols +
+                            ((size_t)region * (size_t)cluster_count +
+                             (size_t)cluster) * FAST55_PRIMARY)) {
+                    free(up_error); free(table_storage);
+                    return STREAM_E_CORRUPT;
+                }
+                memcpy(previous, current, sizeof(previous));
+                previous_table = previous;
+            }
+        }
+        uint16_t tail_frequencies[512];
+        if (!fast55_decode_frequency_range(
+                &frequency_decoder, &frequency_model, tail_frequencies,
+                NULL, tail_alphabet) ||
+            !fast55_fill_decode_table(tail_frequencies, tail_alphabet,
+                                      tail_table) ||
+            frequency_decoder.truncated) {
+            free(up_error); free(table_storage);
+            return STREAM_E_CORRUPT;
+        }
+    } else {
+        uint16_t frequencies[FAST55_PRIMARY];
+        for (int region = 0; region < region_count; ++region)
+            for (int cluster = 0; cluster < cluster_count; ++cluster)
+                if (!fast55_read_frequency_table(
+                        &reader, FAST55_PRIMARY, frequencies) ||
+                    !fast55_fill_primary_decode_table(
+                        frequencies, FAST55_PRIMARY,
+                        tables + ((size_t)region * (size_t)cluster_count +
+                                  (size_t)cluster) * FAST55_SCALE,
+                        primary_symbols +
+                            ((size_t)region * (size_t)cluster_count +
+                             (size_t)cluster) * FAST55_PRIMARY)) {
+                    free(up_error); free(table_storage);
+                    return STREAM_E_CORRUPT;
+                }
+        uint16_t tail_frequencies[512];
+        if (!fast55_read_frequency_table(
+                &reader, tail_alphabet, tail_frequencies) ||
+            !fast55_fill_decode_table(
+                tail_frequencies, tail_alphabet, tail_table)) {
+            free(up_error); free(table_storage);
+            return STREAM_E_CORRUPT;
+        }
+    }
+    uint32_t run_size;
+    if (!fast55_read_u32(&reader, &run_size) ||
+        run_size > (size_t)(reader.end - reader.cursor)) {
+        free(up_error); free(table_storage);
+        return STREAM_E_CORRUPT;
+    }
+    Fast55Reader runs = {reader.cursor, reader.cursor + run_size};
+    reader.cursor += run_size;
+    uint32_t ans_size;
+    if (!fast55_read_u32(&reader, &ans_size) ||
+        ans_size < FAST55_LANES * sizeof(uint32_t) ||
+        ans_size > (size_t)(reader.end - reader.cursor)) {
+        free(up_error); free(table_storage);
+        return STREAM_E_CORRUPT;
+    }
+    Fast55Reader ans = {reader.cursor, reader.cursor + ans_size};
+    reader.cursor += ans_size;
+    if (reader.cursor != reader.end) {
+        free(up_error); free(table_storage);
+        return STREAM_E_CORRUPT;
+    }
+    uint32_t states[FAST55_LANES];
+    for (int lane = 0; lane < FAST55_LANES; ++lane)
+        if (!fast55_read_u32(&ans, &states[lane]) ||
+            states[lane] < FAST55_RANS_L) {
+            free(up_error); free(table_storage);
+            return STREAM_E_CORRUPT;
+        }
+    const uint8_t *ans_cursor = ans.cursor;
+    uint32_t w = width;
+    int half = 1 << (depth - 1);
+    int maximum = (1 << depth) - 1;
+    size_t pixels = (size_t)width * height;
+    uint32_t tiles_x = (width + (1u << tile_log) - 1u) >> tile_log;
+    size_t index = 0;
+    size_t event = 0;
+    uint32_t run_remaining = 0;
+    uint32_t region_row = region_split == 1 ? (height + 3u) / 4u :
+                                              (height + 1u) / 2u;
+    const uint8_t *input_state = state_in;
+    uint8_t *output_state = state_out;
+    int pack_state = paired_context && state_out && state_in &&
+                     state_out == state_in;
+    for (uint32_t y = 0; y < height; ++y) {
+        uint16_t *row = plane + (size_t)y * width;
+        const uint16_t *up = y ? row - width : row;
+        const uint16_t *up2 = y > 1 ? up - width : up;
+        const uint8_t *tile_map =
+            map + (size_t)(y >> tile_log) * tiles_x;
+        int entropy_region =
+            region_count == 1 ? 0 : y >= region_row;
+        const uint8_t *region_tables =
+            tables + (size_t)entropy_region * (size_t)cluster_count *
+                          FAST55_SCALE;
+        const Fast55Symbol *region_symbols =
+            primary_symbols +
+            (size_t)entropy_region * (size_t)cluster_count * FAST55_PRIMARY;
+        uint8_t left_error = 0;
+#define FAST55_DECODE_RANGE(PREDICTION, REFERENCE_PREDICTOR) do { \
+        while (x < tile_end) { \
+            int Wv, Nv, NWv, NEv; NEIGHBORS(); \
+            int WWv = x > 1 ? row[x - 2u] : Wv; \
+            int NNv = y > 1 ? up2[x] : Nv; \
+            int prediction; \
+            unsigned symbol = 0; \
+            int channel_context__ = input_state ? *input_state++ : 0; \
+            if (run_remaining) { \
+                prediction = (PREDICTION); \
+                --run_remaining; \
+            } else { \
+                int cross = channel_context__; \
+                if (paired_context && state_in && !state_out) { \
+                    int current__ = channel_context__ & 15; \
+                    int previous__ = channel_context__ >> 4; \
+                    cross = current__ ? current__ : \
+                            previous__ ? previous__ + 4 : 0; \
+                } \
+                int context; \
+                if (simple_context) { \
+                    prediction = (PREDICTION); \
+                    int activity; \
+                    int reference = fast55_activity_hint_reference( \
+                        Wv, Nv, NWv, NEv, WWv, NNv, &activity); \
+                    (void)reference; \
+                    int hint = (REFERENCE_PREDICTOR) ? 1 : \
+                               (reference > prediction) - \
+                               (reference < prediction) + 1; \
+                    context = fast55_activity(activity) + \
+                              12 * fast55_error_state( \
+                                  left_error, up_error[x]) + \
+                              predictor_context + \
+                              288 * hint + 864 * cross; \
+                } else { \
+                    int activity; \
+                    int reference = fast55_activity_reference( \
+                        Wv, Nv, NWv, NEv, WWv, NNv, maximum, &activity); \
+                    prediction = (REFERENCE_PREDICTOR) ? reference : \
+                                                         (PREDICTION); \
+                    int hint = (reference > prediction) - \
+                               (reference < prediction) + 1; \
+                    context = fast55_activity(activity) + \
+                              12 * fast55_error_state( \
+                                  left_error, up_error[x]) + \
+                              predictor_context + \
+                              288 * hint + 864 * cross; \
+                } \
+                int cluster = mapping[context]; \
+                uint32_t *state = \
+                    &states[event & (FAST55_LANES - 1u)]; \
+                ++event; \
+                 if (!fast55_rans_get_primary( \
+                         state, region_tables + \
+                             (size_t)cluster * FAST55_SCALE, \
+                         region_symbols + \
+                             (size_t)cluster * FAST55_PRIMARY, \
+                         &ans_cursor, ans.end, &symbol)) { \
+                    free(up_error); free(table_storage); \
+                    return STREAM_E_CORRUPT; \
+                } \
+                if (symbol == FAST55_RUN) { \
+                    uint32_t stored_run; \
+                    if (!use_runs || \
+                        !fast55_read_uint(&runs, &stored_run) || \
+                        stored_run > UINT32_MAX - FAST55_RUN_MIN || \
+                        (size_t)stored_run + FAST55_RUN_MIN > \
+                            pixels - index) { \
+                        free(up_error); free(table_storage); \
+                        return STREAM_E_CORRUPT; \
+                    } \
+                    run_remaining = stored_run + FAST55_RUN_MIN - 1u; \
+                    symbol = 0; \
+                } else if (symbol == FAST55_ESCAPE) { \
+                    unsigned tail; \
+                    if (!fast55_rans_get( \
+                            state, tail_table, &ans_cursor, ans.end, &tail)) { \
+                        free(up_error); free(table_storage); \
+                        return STREAM_E_CORRUPT; \
+                    } \
+                    symbol += tail; \
+                } \
+                if (symbol > (unsigned)maximum) { \
+                    free(up_error); free(table_storage); \
+                    return STREAM_E_CORRUPT; \
+                } \
+            } \
+            Fast55Residual residual__ = fast55_residual_lut[symbol]; \
+            row[x] = (uint16_t)((prediction + residual__.error) & maximum); \
+            if (output_state) { \
+                uint8_t next__ = residual__.channel_state; \
+                if (pack_state) \
+                    next__ = (uint8_t)((channel_context__ << 4) | next__); \
+                *output_state++ = next__; \
+            } \
+            left_error = residual__.error_state; \
+            up_error[x] = left_error; \
+            ++index; \
+            ++x; \
+        } \
+    } while (0)
+        uint32_t x = 0;
+        for (uint32_t tile = 0; tile < tiles_x; ++tile) {
+            uint32_t tile_end = (tile + 1u) << tile_log;
+            if (tile_end > width) tile_end = width;
+            int predictor = tile_map[tile];
+            int predictor_context = decode_predictor_context[predictor];
+            switch (predictor) {
+            case 0: FAST55_DECODE_RANGE(
+                        predict(0, Wv, Nv, NWv, NEv, maximum), 0); break;
+            case 1: FAST55_DECODE_RANGE(paethp(Wv, Nv, NWv), 0); break;
+            case 2: FAST55_DECODE_RANGE(Wv, 0); break;
+            case 3: FAST55_DECODE_RANGE(Nv, 0); break;
+            case 4: FAST55_DECODE_RANGE((Wv + Nv + 1) >> 1, 0); break;
+            case 5: FAST55_DECODE_RANGE(
+                        clampi(Nv + Wv - NWv, 0, maximum), 0); break;
+            case 6: FAST55_DECODE_RANGE(NEv, 0); break;
+            case 7: FAST55_DECODE_RANGE((Wv + NEv + 1) >> 1, 0); break;
+            case 8: FAST55_DECODE_RANGE((Nv + NEv + 1) >> 1, 0); break;
+            case 9: FAST55_DECODE_RANGE(
+                        clampi(2 * Wv - WWv, 0, maximum), 0); break;
+            case 10: FAST55_DECODE_RANGE(
+                         clampi(2 * Nv - NNv, 0, maximum), 0); break;
+            case 11: FAST55_DECODE_RANGE(
+                         clampi(Wv + (((Nv - NWv) * 3) >> 2), 0, maximum),
+                         0); break;
+            case 12: FAST55_DECODE_RANGE(
+                         clampi(Nv + (((Wv - NWv) * 3) >> 2), 0, maximum),
+                         0); break;
+            case 13: FAST55_DECODE_RANGE(
+                         gapp(Wv, Nv, NWv, NEv, WWv, NNv, maximum), 1);
+                     break;
+            case 14: FAST55_DECODE_RANGE(
+                         clampi((Wv + Nv + NEv + NWv + 2) >> 2,
+                                0, maximum), 0); break;
+            case 15: FAST55_DECODE_RANGE(
+                         clampi((5 * Wv + 2 * Nv - 3 * NWv + NEv + 2) >> 2,
+                                0, maximum), 0); break;
+            case 16: FAST55_DECODE_RANGE(
+                         clampi((Wv + 3 * Nv + 2) >> 2, 0, maximum), 0);
+                     break;
+            case 17: FAST55_DECODE_RANGE(
+                         clampi((3 * Wv + Nv + 2) >> 2, 0, maximum), 0);
+                     break;
+            case 18: FAST55_DECODE_RANGE(
+                         clampi((5 * Nv + 2 * Wv - 3 * NWv + NEv + 2) >> 2,
+                                0, maximum), 0); break;
+            case 19: FAST55_DECODE_RANGE(
+                         clampi((2 * Wv + Nv - NWv + 1) >> 1,
+                                0, maximum), 0); break;
+            case 20: FAST55_DECODE_RANGE(
+                         clampi((Wv + 2 * Nv - NWv + 1) >> 1,
+                                0, maximum), 0); break;
+            case 21: FAST55_DECODE_RANGE(
+                         clampi(Wv + ((NEv - NWv) >> 1), 0, maximum), 0);
+                     break;
+            case 22: FAST55_DECODE_RANGE(
+                         clampi(Nv + ((NEv - NWv) >> 1), 0, maximum), 0);
+                     break;
+            case 23: FAST55_DECODE_RANGE(
+                         clampi((Wv + Nv + NEv + 1) / 3, 0, maximum), 0);
+                     break;
+            case 24: FAST55_DECODE_RANGE(
+                         clampi((2 * Wv + Nv + NEv + 2) >> 2,
+                                0, maximum), 0); break;
+            case 25: FAST55_DECODE_RANGE(
+                         clampi((Wv + 2 * Nv + NWv + 2) >> 2,
+                                0, maximum), 0); break;
+            case 26: FAST55_DECODE_RANGE(
+                         clampi((3 * Wv + 3 * Nv - 2 * NWv + 2) >> 2,
+                                0, maximum), 0); break;
+            case 27: FAST55_DECODE_RANGE(
+                         clampi((4 * Nv + Wv - 2 * NWv + NEv + 2) >> 2,
+                                0, maximum), 0); break;
+            case 28: FAST55_DECODE_RANGE(
+                         clampi((4 * Wv + Nv - 2 * NWv + NEv + 2) >> 2,
+                                0, maximum), 0); break;
+            case 29: FAST55_DECODE_RANGE(
+                         clampi((Wv + Nv + NEv - NWv + 1) >> 1,
+                                0, maximum), 0); break;
+            case 30: FAST55_DECODE_RANGE(
+                         clampi((6 * Wv + 2 * Nv - 5 * NWv + NEv + 2) >> 2,
+                                0, maximum), 0); break;
+            default: FAST55_DECODE_RANGE(
+                         clampi((2 * Wv + 6 * Nv - 5 * NWv + NEv + 2) >> 2,
+                                0, maximum), 0); break;
+            }
+        }
+#undef FAST55_DECODE_RANGE
+    }
+    int ok = ans_cursor == ans.end && runs.cursor == runs.end &&
+             !run_remaining;
+    for (int lane = 0; lane < FAST55_LANES; ++lane)
+        ok &= states[lane] == FAST55_RANS_L;
+    free(up_error);
+    free(table_storage);
+    return ok ? STREAM_OK : STREAM_E_CORRUPT;
+}
+
+
+
+static int fast55_stream_decode(const uint8_t *data, size_t size,
+                                uint32_t width, uint32_t height,
+                                int transform, int tile_log, uint32_t crc,
+                                int rgba, uint8_t **out, int *channels) {
+    model_ensure();
+    Fast55Reader reader = {data, data + size};
+    uint8_t magic[4];
+    uint32_t map_size;
+    if (!fast55_read(&reader, magic, sizeof(magic)) ||
+        memcmp(magic, "Q55A", 4) || !fast55_read_u32(&reader, &map_size) ||
+        map_size > (size_t)(reader.end - reader.cursor))
+        return STREAM_E_CORRUPT;
+    uint32_t tiles_x = (width + (1u << tile_log) - 1u) >> tile_log;
+    uint32_t tiles_y = (height + (1u << tile_log) - 1u) >> tile_log;
+    size_t tiles = (size_t)tiles_x * tiles_y;
+    if (tiles > SIZE_MAX / 3u) return STREAM_E_ALLOC;
+    uint8_t *maps = malloc(tiles * 3u);
+    if (!maps) return STREAM_E_ALLOC;
+    Dec map_decoder;
+    dec_init(&map_decoder, reader.cursor, map_size, ADAPT_DEFAULT);
+    reader.cursor += map_size;
+    int error = STREAM_OK;
+    for (int plane = 0; plane < 3 && error == STREAM_OK; ++plane)
+        error = fast55_decode_map(&map_decoder, maps + (size_t)plane * tiles,
+                                  tiles, tiles_x);
+    size_t pixels = (size_t)width * height;
+    uint16_t *plane_storage = error == STREAM_OK
+                                  ? malloc(pixels * 3u * sizeof(uint16_t))
+                                  : NULL;
+    uint8_t *state = plane_storage ? malloc(pixels) : NULL;
+    if (error == STREAM_OK && (!plane_storage || !state))
+        error = STREAM_E_ALLOC;
+    uint16_t *planes[3] = {
+        plane_storage, plane_storage ? plane_storage + pixels : NULL,
+        plane_storage ? plane_storage + pixels * 2u : NULL
+    };
+    int depth[3] = {8, transform ? 9 : 8, transform ? 9 : 8};
+    for (int plane = 0; plane < 3 && error == STREAM_OK; ++plane) {
+        uint32_t block_size;
+        if (!fast55_read_u32(&reader, &block_size) ||
+            block_size > (size_t)(reader.end - reader.cursor)) {
+            error = STREAM_E_CORRUPT;
+            break;
+        }
+        uint8_t *state_out = plane < 2 ? state : NULL;
+        const uint8_t *state_in = plane ? state : NULL;
+        error = fast55_decode_plane(
+            reader.cursor, block_size, planes[plane],
+            maps + (size_t)plane * tiles, width, height, depth[plane],
+            tile_log, state_out, state_in);
+        reader.cursor += block_size;
+    }
+    if (error == STREAM_OK && reader.cursor != reader.end)
+        error = STREAM_E_CORRUPT;
+    size_t stride = rgba ? 4u : 3u;
+    uint8_t *pixels_out = error == STREAM_OK ? malloc(pixels * stride) : NULL;
+    if (error == STREAM_OK && !pixels_out) error = STREAM_E_ALLOC;
+    if (error == STREAM_OK) {
+        inv_transform(planes, pixels, (int)stride, transform, pixels_out);
+    }
+    if (error == STREAM_OK && rgba)
+        for (size_t index = 0; index < pixels; ++index)
+            pixels_out[index * 4u + 3u] = 255;
+    if (error == STREAM_OK) {
+        uint32_t decoded_crc = rgba ? stream_crc32_rgbx(pixels_out, pixels) :
+                                      stream_crc32(pixels_out, pixels * 3u);
+        if (decoded_crc != crc) error = STREAM_E_CORRUPT;
+    }
+    free(state);
+    free(plane_storage);
+    free(maps);
+    if (error != STREAM_OK) {
+        free(pixels_out);
+        return error;
+    }
+    *out = pixels_out;
+    *channels = rgba ? 4 : 3;
+    return STREAM_OK;
+}
+
 static int try_encode_limited(const EncCtx *c, int mode, int t, int tlog,
                               int adapt, size_t limit, uint8_t **out,
                               size_t *outn) {
@@ -5171,6 +7934,7 @@ static int try_encode_limited(const EncCtx *c, int mode, int t, int tlog,
     size_t sch = c->stride;
     size_t palb0 = mode == 1 ? 2 + (size_t)c->pal_n * (size_t)c->ch : 0;
     if (mode == 42) return split37_stream_encode(c, t, tlog, limit, out, outn);
+    if (mode == 55) return fast55_stream_encode(c, t, tlog, limit, out, outn);
     if (adapt != ADAPT_DEFAULT && c->ch == 4 && c->const_alpha) adapt = ADAPT_DEFAULT;
     size_t prefix = STREAM_HDR + palb0;
     if (limit != SIZE_MAX && limit <= prefix) return STREAM_E_FORMAT;
@@ -5204,7 +7968,9 @@ static int try_encode_limited(const EncCtx *c, int mode, int t, int tlog,
             return STREAM_E_ALLOC;
         }
     }
-    int context_plane = plane_method_for(mode) == PLANE_CONTEXT;
+    int plane_method = plane_method_for(mode);
+    int context_plane =
+        plane_method == PLANE_CONTEXT || plane_method == PLANE_SPARSE;
     int local_mode = mode == 45 || (mode >= 52 && mode <= 54);
     int map_kind =
         mode == 45 || ((mode >= 52 && mode <= 54) &&
@@ -5331,6 +8097,27 @@ static int try_improve(const EncCtx *c, int mode, int transform, int tlog,
     int err = try_encode_limited(c, mode, transform, tlog, adapt, *best_size,
                                  &candidate, &candidate_size);
     if (err == STREAM_OK && candidate_size < *best_size) {
+        free(*best);
+        *best = candidate;
+        *best_size = candidate_size;
+        return 1;
+    }
+    free(candidate);
+    return 0;
+}
+
+static int try_fast55_candidate(const EncCtx *context, int transform,
+                                int tile_log, uint8_t **best,
+                                size_t *best_size) {
+    size_t margin = *best_size / 20u;
+    size_t limit = *best_size <= SIZE_MAX - margin
+                       ? *best_size + margin : SIZE_MAX;
+    uint8_t *candidate = NULL;
+    size_t candidate_size = 0;
+    int error = try_encode_limited(context, 55, transform, tile_log,
+                                   ADAPT_DEFAULT, limit, &candidate,
+                                   &candidate_size);
+    if (error == STREAM_OK && candidate_size < *best_size) {
         free(*best);
         *best = candidate;
         *best_size = candidate_size;
@@ -5819,14 +8606,22 @@ static int stream_encode_strided_base(
             &fast_dense);
     if (search == 1 && color)
         nb = ranked_transforms_for(&c, base, 2);
-    if (search <= 1 && color && !pal_ok && nb > 0 &&
-        npix > 1000000u && zero_run_candidate_for(&c, base[0][0])) {
+    unsigned fast_zero_rate =
+        search <= 1 && color && !pal_ok && nb > 0 && npix > 1000000u
+            ? zero_run_rate_for(&c, base[0][0])
+            : 0u;
+    if (fast_zero_rate >= 7500u) {
         uint8_t *fast = NULL;
         size_t fastn = 0;
         int ferr = try_encode_limited(&c, 45, base[0][0], 3, ADAPT_DEFAULT,
                                       SIZE_MAX, &fast, &fastn);
         if (ferr == STREAM_OK && fastn < npix * 3u / 8u) {
-            try_improve(&c, 45, base[0][0], 0, ADAPT_DEFAULT, &fast, &fastn);
+            if (mapfree_candidate_for(&c, base[0][0], 3))
+                try_improve(&c, 45, base[0][0], 0, ADAPT_DEFAULT, &fast,
+                            &fastn);
+            if (fast_zero_rate >= 9400u && base[0][0] >= 30)
+                try_improve(&c, 56, base[0][0], 3, ADAPT_DEFAULT, &fast,
+                            &fastn);
             *out = fast;
             *outn = fastn;
             free_map37_cache(&map_cache);
@@ -5881,7 +8676,8 @@ static int stream_encode_strided_base(
                 if (L == 4) { cl[nc].mode = 25; cl[nc].t = t; cl[nc].tlog = L; nc++; }
             }
             if (search == 7 && L == 4) { cl[nc].mode = 38; cl[nc].t = t; cl[nc].tlog = 0; nc++; }
-            if (event_ok && L == 4 && special_color_trials < 2) {
+            if (search > 0 && event_ok && L == 4 &&
+                special_color_trials < 2) {
                 special_color_trials++;
                 cl[nc].mode = 39; cl[nc].t = t; cl[nc].tlog = 0; nc++;
                 cl[nc].mode = 40; cl[nc].t = t; cl[nc].tlog = 1; nc++;
@@ -5950,6 +8746,11 @@ static int stream_encode_strided_base(
             if (cl[i].mode == 37 || cl[i].mode == 41) {
                 if (cl[i].tlog == 3) map3 |= bit;
                 else if (cl[i].tlog == 4) map4 |= bit;
+            }
+            if (color && search <= 0 && npix > 1000000u &&
+                cl[i].mode == 52 && cl[i].tlog == 3) {
+                map3 |= bit;
+                map4 |= bit;
             }
         }
         c.map37_pair_mask = map3 & map4;
@@ -6163,6 +8964,22 @@ static int stream_encode_strided_base(
                     WEIGHTED_MIN_GAIN_BPS, 256u, &res[best], &rlen[best]);
         }
     }
+    if (best >= 0 && search <= 0 && c.ch == 3 && color &&
+        npix >= 65536u && rlen[best] > STREAM_HDR && res[best][16]) {
+        int transform = res[best][15];
+        size_t incumbent_size = rlen[best];
+        int sparse_selected = 0;
+        unsigned zero_rate = zero_run_rate_for(&c, transform);
+        if (zero_rate >= 8000u)
+            sparse_selected =
+                try_improve(&c, 56, transform, 3, ADAPT_DEFAULT,
+                            &res[best], &rlen[best]);
+        size_t decisive_gain = incumbent_size / 100u;
+        if (zero_rate < 6000u &&
+            (!sparse_selected || incumbent_size - rlen[best] < decisive_gain))
+            try_fast55_candidate(&c, transform, 4,
+                                 &res[best], &rlen[best]);
+    }
     free_map37_cache(&refined_map_cache);
     int err = STREAM_OK;
     if (best < 0) err = rerr[0];
@@ -6335,6 +9152,9 @@ static int stream_parse_info(const uint8_t *data, size_t n,
     if (mode != 1 && (ch == 1 || gray) && t != 0) return STREAM_E_FORMAT;
     if ((mode == 38 || mode == 39) && tlog != 0) return STREAM_E_FORMAT;
     if (mode == 40 && tlog != 1) return STREAM_E_FORMAT;
+    if (mode == 55 && (ch != 3 || gray || calpha || !tlog))
+        return STREAM_E_FORMAT;
+    if (mode == 56 && !tlog) return STREAM_E_FORMAT;
 
     size_t off = STREAM_HDR, pal_n = 0;
     int adapt = ADAPT_DEFAULT;
@@ -6454,6 +9274,15 @@ static int stream_decode_impl(const uint8_t *data, size_t n,
         *pixout = expanded;
         *pch = 4;
         return STREAM_OK;
+    }
+    if (mode == 55) {
+        result = fast55_stream_decode(data + off, plen, w, h, t, tlog, crc,
+                                      rgba, pixout, pch);
+        if (result == STREAM_OK) {
+            *pw = w;
+            *ph = h;
+        }
+        return result;
     }
 
     Dec d; dec_init(&d, data + off, plen, adapt);

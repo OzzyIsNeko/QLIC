@@ -123,43 +123,61 @@ qlic_map37_cost_tile_avx2(const uint16_t *plane, uint32_t stride, uint32_t x,
       __m256i ne = load8(up + 1);
       __m256i ww = load8(row - 2);
       __m256i nn = load8(up2);
-      __m256i p[32];
+#define ADD_BASE37(ID, PREDICTION) do { \
+        __m256i prediction__ = (PREDICTION); \
+        base[ID] = _mm256_add_epi32( \
+            base[ID], gather_cost(diff_cost, value, prediction__, offset)); \
+      } while (0)
+#define ADD_BOTH37(ID, XID, PREDICTION) do { \
+        __m256i prediction__ = (PREDICTION); \
+        base[ID] = _mm256_add_epi32( \
+            base[ID], gather_cost(diff_cost, value, prediction__, offset)); \
+        if (xzr_cost) \
+          xzr[XID] = _mm256_add_epi32( \
+              xzr[XID], gather_cost(diff_xzr, value, prediction__, offset)); \
+      } while (0)
 
-      p[0] = gradient(w, n, nw);
-      p[1] = paeth(w, n, nw);
-      p[2] = w;
-      p[3] = n;
-      p[4] = _mm256_srai_epi32(
-          _mm256_add_epi32(_mm256_add_epi32(w, n), _mm256_set1_epi32(1)), 1);
-      p[5] = clampv(_mm256_sub_epi32(_mm256_add_epi32(n, w), nw), zero, vmax);
-      p[6] = ne;
-      p[7] = _mm256_srai_epi32(
-          _mm256_add_epi32(_mm256_add_epi32(w, ne), _mm256_set1_epi32(1)), 1);
-      p[8] = _mm256_srai_epi32(
-          _mm256_add_epi32(_mm256_add_epi32(n, ne), _mm256_set1_epi32(1)), 1);
-      p[9] = clampv(_mm256_sub_epi32(_mm256_slli_epi32(w, 1), ww), zero, vmax);
-      p[10] = clampv(_mm256_sub_epi32(_mm256_slli_epi32(n, 1), nn), zero, vmax);
-      p[11] = clampv(
+      ADD_BOTH37(0, 0, gradient(w, n, nw));
+      ADD_BASE37(1, paeth(w, n, nw));
+      ADD_BOTH37(2, 1, w);
+      ADD_BOTH37(3, 2, n);
+      ADD_BOTH37(4, 3, _mm256_srai_epi32(
+          _mm256_add_epi32(_mm256_add_epi32(w, n), _mm256_set1_epi32(1)), 1));
+      ADD_BOTH37(5, 4,
+                 clampv(_mm256_sub_epi32(_mm256_add_epi32(n, w), nw),
+                        zero, vmax));
+      ADD_BOTH37(6, 5, ne);
+      ADD_BOTH37(7, 6, _mm256_srai_epi32(
+          _mm256_add_epi32(_mm256_add_epi32(w, ne), _mm256_set1_epi32(1)), 1));
+      ADD_BASE37(8, _mm256_srai_epi32(
+          _mm256_add_epi32(_mm256_add_epi32(n, ne), _mm256_set1_epi32(1)), 1));
+      ADD_BOTH37(9, 8,
+                 clampv(_mm256_sub_epi32(_mm256_slli_epi32(w, 1), ww),
+                        zero, vmax));
+      ADD_BOTH37(10, 9,
+                 clampv(_mm256_sub_epi32(_mm256_slli_epi32(n, 1), nn),
+                        zero, vmax));
+      ADD_BASE37(11, clampv(
           _mm256_add_epi32(
               w, _mm256_srai_epi32(_mm256_mullo_epi32(_mm256_sub_epi32(n, nw),
                                                       _mm256_set1_epi32(3)),
                                    2)),
-          zero, vmax);
-      p[12] = clampv(
+          zero, vmax));
+      ADD_BASE37(12, clampv(
           _mm256_add_epi32(
               n, _mm256_srai_epi32(_mm256_mullo_epi32(_mm256_sub_epi32(w, nw),
                                                       _mm256_set1_epi32(3)),
                                    2)),
-          zero, vmax);
-      p[13] = gappv(w, n, nw, ne, ww, nn, zero, vmax);
-      p[14] = clampv(
+          zero, vmax));
+      ADD_BASE37(13, gappv(w, n, nw, ne, ww, nn, zero, vmax));
+      ADD_BASE37(14, clampv(
           _mm256_srai_epi32(
               _mm256_add_epi32(_mm256_add_epi32(_mm256_add_epi32(w, n),
                                                 _mm256_add_epi32(ne, nw)),
                                _mm256_set1_epi32(2)),
               2),
-          zero, vmax);
-      p[15] = clampv(
+          zero, vmax));
+      ADD_BASE37(15, clampv(
           _mm256_srai_epi32(
               _mm256_add_epi32(
                   _mm256_add_epi32(
@@ -170,23 +188,22 @@ qlic_map37_cost_tile_avx2(const uint16_t *plane, uint32_t stride, uint32_t x,
                           ne, _mm256_mullo_epi32(nw, _mm256_set1_epi32(3)))),
                   _mm256_set1_epi32(2)),
               2),
-          zero, vmax);
-      p[16] = clampv(_mm256_srai_epi32(
+          zero, vmax));
+      ADD_BASE37(16, clampv(_mm256_srai_epi32(
                          _mm256_add_epi32(
                              _mm256_add_epi32(w, _mm256_mullo_epi32(
                                                      n, _mm256_set1_epi32(3))),
                              _mm256_set1_epi32(2)),
                          2),
-                     zero, vmax);
-      p[17] =
-          clampv(_mm256_srai_epi32(
+                     zero, vmax));
+      ADD_BOTH37(17, 15, clampv(_mm256_srai_epi32(
                      _mm256_add_epi32(
                          _mm256_add_epi32(
                              _mm256_mullo_epi32(w, _mm256_set1_epi32(3)), n),
                          _mm256_set1_epi32(2)),
                      2),
-                 zero, vmax);
-      p[18] = clampv(
+                 zero, vmax));
+      ADD_BASE37(18, clampv(
           _mm256_srai_epi32(
               _mm256_add_epi32(
                   _mm256_add_epi32(
@@ -197,46 +214,42 @@ qlic_map37_cost_tile_avx2(const uint16_t *plane, uint32_t stride, uint32_t x,
                           ne, _mm256_mullo_epi32(nw, _mm256_set1_epi32(3)))),
                   _mm256_set1_epi32(2)),
               2),
-          zero, vmax);
-      p[19] =
-          clampv(_mm256_srai_epi32(
+          zero, vmax));
+      ADD_BASE37(19, clampv(_mm256_srai_epi32(
                      _mm256_add_epi32(
                          _mm256_sub_epi32(
                              _mm256_add_epi32(_mm256_slli_epi32(w, 1), n), nw),
                          _mm256_set1_epi32(1)),
                      1),
-                 zero, vmax);
-      p[20] =
-          clampv(_mm256_srai_epi32(
+                 zero, vmax));
+      ADD_BASE37(20, clampv(_mm256_srai_epi32(
                      _mm256_add_epi32(
                          _mm256_sub_epi32(
                              _mm256_add_epi32(w, _mm256_slli_epi32(n, 1)), nw),
                          _mm256_set1_epi32(1)),
                      1),
-                 zero, vmax);
+                 zero, vmax));
       __m256i ne_nw_half = _mm256_srai_epi32(_mm256_sub_epi32(ne, nw), 1);
-      p[21] = clampv(_mm256_add_epi32(w, ne_nw_half), zero, vmax);
-      p[22] = clampv(_mm256_add_epi32(n, ne_nw_half), zero, vmax);
-      p[23] = clampv(div3_nonnegative(_mm256_add_epi32(
+      ADD_BASE37(21, clampv(_mm256_add_epi32(w, ne_nw_half), zero, vmax));
+      ADD_BASE37(22, clampv(_mm256_add_epi32(n, ne_nw_half), zero, vmax));
+      ADD_BASE37(23, clampv(div3_nonnegative(_mm256_add_epi32(
                          _mm256_add_epi32(_mm256_add_epi32(w, n), ne),
                          _mm256_set1_epi32(1))),
-                     zero, vmax);
-      p[24] =
-          clampv(_mm256_srai_epi32(
+                     zero, vmax));
+      ADD_BASE37(24, clampv(_mm256_srai_epi32(
                      _mm256_add_epi32(_mm256_add_epi32(_mm256_slli_epi32(w, 1),
                                                        _mm256_add_epi32(n, ne)),
                                       _mm256_set1_epi32(2)),
                      2),
-                 zero, vmax);
-      p[25] =
-          clampv(_mm256_srai_epi32(
+                 zero, vmax));
+      ADD_BASE37(25, clampv(_mm256_srai_epi32(
                      _mm256_add_epi32(
                          _mm256_add_epi32(
                              _mm256_add_epi32(w, _mm256_slli_epi32(n, 1)), nw),
                          _mm256_set1_epi32(2)),
                      2),
-                 zero, vmax);
-      p[26] = clampv(
+                 zero, vmax));
+      ADD_BOTH37(26, 7, clampv(
           _mm256_srai_epi32(
               _mm256_add_epi32(
                   _mm256_sub_epi32(_mm256_mullo_epi32(_mm256_add_epi32(w, n),
@@ -244,9 +257,8 @@ qlic_map37_cost_tile_avx2(const uint16_t *plane, uint32_t stride, uint32_t x,
                                    _mm256_slli_epi32(nw, 1)),
                   _mm256_set1_epi32(2)),
               2),
-          zero, vmax);
-      p[27] =
-          clampv(_mm256_srai_epi32(
+          zero, vmax));
+      ADD_BASE37(27, clampv(_mm256_srai_epi32(
                      _mm256_add_epi32(
                          _mm256_add_epi32(
                              _mm256_sub_epi32(
@@ -255,9 +267,8 @@ qlic_map37_cost_tile_avx2(const uint16_t *plane, uint32_t stride, uint32_t x,
                              ne),
                          _mm256_set1_epi32(2)),
                      2),
-                 zero, vmax);
-      p[28] =
-          clampv(_mm256_srai_epi32(
+                 zero, vmax));
+      ADD_BASE37(28, clampv(_mm256_srai_epi32(
                      _mm256_add_epi32(
                          _mm256_add_epi32(
                              _mm256_sub_epi32(
@@ -266,17 +277,15 @@ qlic_map37_cost_tile_avx2(const uint16_t *plane, uint32_t stride, uint32_t x,
                              ne),
                          _mm256_set1_epi32(2)),
                      2),
-                 zero, vmax);
-      p[29] =
-          clampv(_mm256_srai_epi32(
+                 zero, vmax));
+      ADD_BASE37(29, clampv(_mm256_srai_epi32(
                      _mm256_add_epi32(
                          _mm256_sub_epi32(
                              _mm256_add_epi32(_mm256_add_epi32(w, n), ne), nw),
                          _mm256_set1_epi32(1)),
                      1),
-                 zero, vmax);
-      p[30] =
-          clampv(_mm256_srai_epi32(
+                 zero, vmax));
+      ADD_BASE37(30, clampv(_mm256_srai_epi32(
                      _mm256_add_epi32(
                          _mm256_add_epi32(
                              _mm256_sub_epi32(
@@ -287,9 +296,8 @@ qlic_map37_cost_tile_avx2(const uint16_t *plane, uint32_t stride, uint32_t x,
                              ne),
                          _mm256_set1_epi32(2)),
                      2),
-                 zero, vmax);
-      p[31] =
-          clampv(_mm256_srai_epi32(
+                 zero, vmax));
+      ADD_BASE37(31, clampv(_mm256_srai_epi32(
                      _mm256_add_epi32(
                          _mm256_add_epi32(
                              _mm256_sub_epi32(
@@ -300,18 +308,9 @@ qlic_map37_cost_tile_avx2(const uint16_t *plane, uint32_t stride, uint32_t x,
                              ne),
                          _mm256_set1_epi32(2)),
                      2),
-                 zero, vmax);
-
-      static const int8_t xmap[32] = {
-          0,  -1, 1,  2,  3,  4,  5,  6,  -1, 8,  9, -1, -1, -1, -1, -1,
-          -1, 15, -1, -1, -1, -1, -1, -1, -1, -1, 7, -1, -1, -1, -1, -1};
-      for (int i = 0; i < 32; ++i) {
-        base[i] = _mm256_add_epi32(base[i],
-                                   gather_cost(diff_cost, value, p[i], offset));
-        if (xzr_cost && xmap[i] >= 0)
-          xzr[xmap[i]] = _mm256_add_epi32(
-              xzr[xmap[i]], gather_cost(diff_xzr, value, p[i], offset));
-      }
+                 zero, vmax));
+#undef ADD_BOTH37
+#undef ADD_BASE37
       if (xzr_cost) {
         __m256i xp;
         xp = clampv(_mm256_srai_epi32(

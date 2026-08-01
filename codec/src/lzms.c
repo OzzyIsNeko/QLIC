@@ -534,7 +534,7 @@ static size_t lzms_translate(uint8_t *data, size_t position,
     opcode_bytes = 3;
   } else {
     if (data[position] & 1u)
-      return position + 4u;
+      return position + 5u;
     opcode_bytes = 1;
     max_offset >>= 1;
   }
