@@ -5598,6 +5598,7 @@ static int fast55_reserve(Fast55Buffer *buffer, size_t extra) {
 }
 
 static int fast55_append(Fast55Buffer *buffer, const void *data, size_t size) {
+    if (!size) return 1;
     if (!fast55_reserve(buffer, size)) return 0;
     memcpy(buffer->data + buffer->size, data, size);
     buffer->size += size;
