@@ -62,9 +62,9 @@ cmake --build build
 ctest --test-dir build
 ```
 
-PNG and wimlib are required by the default Linux build. WebP, JPEG XL, AVIF, and TIFF input support is enabled when their development packages are available. Wimlib supplies the Linux LZMS encoder, while QLIC uses its own decoder.
+PNG is required by the default Linux build. WebP, JPEG XL, AVIF, TIFF, and wimlib support is enabled when their development packages are available. Wimlib supplies the Linux LZMS encoder, while QLIC uses its own decoder.
 
-For a decoder or SDK build without image libraries or wimlib, set `QLIC_BUILD_CLI=OFF` and `QLIC_LINUX_LZMS=OFF`.
+Set `QLIC_LINUX_LZMS=ON` to require wimlib or `QLIC_LINUX_LZMS=OFF` to disable it. For a decoder or SDK build without image libraries, set `QLIC_BUILD_CLI=OFF`.
 
 ## CLI
 
