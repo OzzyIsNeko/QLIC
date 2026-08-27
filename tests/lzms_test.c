@@ -65,6 +65,17 @@ static int run_file(const char *path) {
        qlic_lzms_decompress(data + start, compressed_size, decoded,
                             payload_size) &&
        memcmp(decoded, windows, payload_size) == 0;
+  if (decoded && windows && written == payload_size &&
+      memcmp(decoded, windows, payload_size) != 0) {
+    unsigned shown = 0;
+    for (size_t i = 0; i < payload_size && shown < 16u; ++i) {
+      if (decoded[i] != windows[i]) {
+        fprintf(stderr, "  offset %zu: qlic=%02x windows=%02x\n",
+                i, decoded[i], windows[i]);
+        ++shown;
+      }
+    }
+  }
   if (decoder)
     CloseDecompressor(decoder);
   free(decoded);

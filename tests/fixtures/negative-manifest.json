@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "format": "QLIC frozen negative-vector recipes",
+  "source": {
+    "file": "native.qlic",
+    "bytes": 73,
+    "sha256": "30576c0a27378c24a91e386507daba99b426ecd4d6e01f9bfd61ff01c72e7196"
+  },
+  "expected_status": "QLIC_BAD_DATA",
+  "crc_repair": "CRC-32/ISO-HDLC; inner QST1 CRC is repaired before outer CRC when requested",
+  "vectors": [
+    {"name":"truncated-footer","mutation":"remove final byte"},
+    {"name":"outer-crc-mismatch","mutation":"xor first outer CRC byte with 0x80"},
+    {"name":"missing-crc-flag","mutation":"clear outer header byte 15 bit 7"},
+    {"name":"reserved-codec-bit","mutation":"set outer header byte 15 to 0x84; repair outer CRC"},
+    {"name":"zero-width","mutation":"set outer width to zero; repair outer CRC"},
+    {"name":"invalid-outer-mode","mutation":"set outer mode to 255; repair outer CRC"},
+    {"name":"illegal-native-transform","mutation":"set outer native transform to 1; repair outer CRC"},
+    {"name":"stored-payload-size-mismatch","mutation":"set declared outer payload size to 42; repair outer CRC"},
+    {"name":"qst-magic","mutation":"replace QST1 byte zero with X; repair outer CRC"},
+    {"name":"qst-invalid-mode","mutation":"set QST1 native mode to 55; repair QST1 and outer CRCs"},
+    {"name":"qst-invalid-tile-log","mutation":"set QST1 tile log2 to 8; repair QST1 and outer CRCs"},
+    {"name":"qst-payload-size-mismatch","mutation":"set QST1 payload size to 12; repair QST1 and outer CRCs"},
+    {"name":"qst-container-crc","mutation":"xor first QST1 container CRC byte; repair outer CRC only"},
+    {"name":"qst-pixel-crc","mutation":"xor first decoded-pixel CRC byte; repair QST1 and outer CRCs"},
+    {"name":"trailing-stored-byte","mutation":"insert 0xa5 before outer footer; repair outer CRC"}
+  ]
+}

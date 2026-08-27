@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QLIC browser smoke test</title>
+</head>
+<body>
+  <main>
+    <h1>QLIC browser smoke test</h1>
+    <pre id="result" data-status="running">Running…</pre>
+  </main>
+  <script type="module">
+    const result = document.getElementById("result");
+    const fail = error => {
+      result.dataset.status = "fail";
+      result.textContent = error && error.stack ? error.stack : String(error);
+      console.error(error);
+    };
+    const workerRequest = (worker, message, transfer, label) =>
+      new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        worker.terminate();
+        reject(new Error(`${label} timed out.`));
+      }, 10000);
+      worker.addEventListener("message", event => {
+        clearTimeout(timeout);
+        worker.terminate();
+        const response = event.data;
+        if (response && response.ok) resolve(response);
+        else reject(new Error((response && response.error) || `${label} failed.`));
+      });
+      worker.addEventListener("error", event => {
+        clearTimeout(timeout);
+        worker.terminate();
+        reject(new Error(event.message || `${label} could not load.`));
+      });
+      try {
+        worker.postMessage({ id: 1, ...message }, transfer);
+      } catch (error) {
+        clearTimeout(timeout);
+        worker.terminate();
+        reject(error);
+      }
+    });
+
+    const encodeInWorker = async (worker, source, label) => {
+      const copy = source.slice();
+      const response = await workerRequest(worker, {
+        operation: "encode",
+        rgba: copy.buffer,
+        width: 2,
+        height: 2
+      }, [copy.buffer], label);
+      return new Uint8Array(response.encoded);
+    };
+
+    const decodeInWorker = async (worker, source, label) => {
+      const copy = source.slice();
+      const response = await workerRequest(worker, {
+        operation: "decode",
+        input: copy.buffer
+      }, [copy.buffer], label);
+      return response.decoded;
+    };
+
+    const pngInWorker = async (worker, source, label) => {
+      const copy = source.slice();
+      const response = await workerRequest(worker, {
+        operation: "png",
+        rgba: copy.buffer,
+        width: 2,
+        height: 2
+      }, [copy.buffer], label);
+      return new Uint8Array(response.png);
+    };
+
+    if (location.protocol === "file:") {
+      result.dataset.status = "redirecting";
+      result.textContent = "Opening the self-contained QLIC browser app…";
+      location.replace(new URL("../dist/qlic-web/index.html", location.href));
+    } else {
+    try {
+      const packageDirectory = new URLSearchParams(location.search).get("package") === "dist"
+        ? "../dist/qlic-web/"
+        : "../web/dist/";
+      const packageRoot = new URL(packageDirectory, location.href);
+      const { createQlic } = await import(new URL("qlic-web.js", packageRoot));
+      const wasmResponse = await fetch(new URL("qlic-web.wasm", packageRoot), {
+        cache: "no-store"
+      });
+      if (!wasmResponse.ok) throw new Error("Wasm fetch failed.");
+
+      const qlic = await createQlic();
+      const source = new Uint8Array([
+        255, 0, 0, 255,
+        0, 255, 0, 128,
+        0, 0, 255, 0,
+        17, 33, 65, 255
+      ]);
+      const encoded = qlic.encode(source, 2, 2);
+      if (!qlic.validate(encoded)) throw new Error("Validation failed.");
+      const decoded = qlic.decode(encoded);
+      const pixels = decoded.frames[0].rgba;
+      if (decoded.width !== 2 || decoded.height !== 2 ||
+          decoded.frames.length !== 1 || pixels.length !== source.length ||
+          pixels.some((value, index) => value !== source[index])) {
+        throw new Error("Main-thread pixel round trip failed.");
+      }
+
+      const canvasSource = new Uint8Array(source);
+      canvasSource[8] = 23;
+      canvasSource[9] = 47;
+      canvasSource[10] = 89;
+      canvasSource[11] = 255;
+      const canvasImage = qlic.decode(qlic.encode(canvasSource, 2, 2));
+      const canvas = document.createElement("canvas");
+      qlic.draw(canvasImage, canvas);
+      const drawn = canvas.getContext("2d").getImageData(0, 0, 2, 2).data;
+      if (drawn.some((value, index) => value !== canvasSource[index])) {
+        throw new Error("Canvas draw failed.");
+      }
+
+      const workerEncoded = await encodeInWorker(new Worker(
+        new URL("qlic-worker.js", packageRoot), { type: "module" }
+      ), source, "Module worker");
+      const workerPixels = qlic.decode(workerEncoded).frames[0].rgba;
+      if (workerPixels.some((value, index) => value !== source[index])) {
+        throw new Error("Module-worker pixel round trip failed.");
+      }
+      const workerDecoded = await decodeInWorker(new Worker(
+        new URL("qlic-worker.js", packageRoot), { type: "module" }
+      ), encoded, "Module worker decode");
+      if (workerDecoded.width !== 2 || workerDecoded.height !== 2 ||
+          workerDecoded.frames[0].rgba.some(
+            (value, index) => value !== source[index])) {
+        throw new Error("Module-worker decode failed.");
+      }
+      const workerPng = await pngInWorker(new Worker(
+        new URL("qlic-worker.js", packageRoot), { type: "module" }
+      ), source, "Module worker PNG");
+      if (workerPng.length < 32 || workerPng[0] !== 137 ||
+          String.fromCharCode(...workerPng.subarray(1, 4)) !== "PNG") {
+        throw new Error("Module-worker PNG export failed.");
+      }
+
+      const indexResponse = await fetch(new URL("index.html", packageRoot), {
+        cache: "no-store"
+      });
+      if (!indexResponse.ok) throw new Error("Standalone app fetch failed.");
+      const indexHtml = await indexResponse.text();
+      for (const marker of [
+        'id="previewCanvas"', 'id="savePng"', 'id="pixelInfo"',
+        'accept=".qlic', "touch-action: none"
+      ]) {
+        if (!indexHtml.includes(marker))
+          throw new Error(`Standalone app is missing ${marker}.`);
+      }
+      const embeddedText = id => {
+        const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const match = indexHtml.match(new RegExp(
+          `<script id="${escaped}"[^>]*>([A-Za-z0-9+/=]+)<\\/script>`
+        ));
+        if (!match) throw new Error(`Standalone app is missing ${id}.`);
+        return match[1];
+      };
+      const textFromBase64 = encoded => {
+        const binary = atob(encoded);
+        const bytes = Uint8Array.from(binary, value => value.charCodeAt(0));
+        return new TextDecoder().decode(bytes);
+      };
+      const standaloneWasm = embeddedText("qlic-standalone-wasm");
+      const standaloneSource = [
+        "const qlicStandaloneWasm = (() => {",
+        `  const binary = atob(${JSON.stringify(standaloneWasm)});`,
+        "  const bytes = new Uint8Array(binary.length);",
+        "  for (let index = 0; index < binary.length; index++)",
+        "    bytes[index] = binary.charCodeAt(index);",
+        "  return bytes;",
+        "})();",
+        textFromBase64(embeddedText("qlic-standalone-module")),
+        textFromBase64(embeddedText("qlic-standalone-worker"))
+      ].join("\n");
+      const standaloneUrl = URL.createObjectURL(new Blob(
+        [standaloneSource], { type: "text/javascript" }
+      ));
+      let standaloneEncoded;
+      let standaloneDecoded;
+      let standalonePng;
+      try {
+        standaloneEncoded = await encodeInWorker(
+          new Worker(standaloneUrl), source, "Standalone classic worker"
+        );
+        standaloneDecoded = await decodeInWorker(
+          new Worker(standaloneUrl), encoded, "Standalone worker decode"
+        );
+        standalonePng = await pngInWorker(
+          new Worker(standaloneUrl), source, "Standalone worker PNG"
+        );
+      } finally {
+        URL.revokeObjectURL(standaloneUrl);
+      }
+      const standalonePixels = qlic.decode(standaloneEncoded).frames[0].rgba;
+      if (standalonePixels.some((value, index) => value !== source[index])) {
+        throw new Error("Standalone-worker pixel round trip failed.");
+      }
+      if (standaloneDecoded.width !== 2 || standaloneDecoded.height !== 2 ||
+          standaloneDecoded.frames[0].rgba.some(
+            (value, index) => value !== source[index])) {
+        throw new Error("Standalone-worker decode failed.");
+      }
+      if (standalonePng.length < 32 || standalonePng[0] !== 137 ||
+          String.fromCharCode(...standalonePng.subarray(1, 4)) !== "PNG") {
+        throw new Error("Standalone-worker PNG export failed.");
+      }
+
+      const fixture = await qlic.decodeUrl("./fixtures/rgb-lzms.qlic");
+      if (fixture.width !== 257 || fixture.height !== 9) {
+        throw new Error("URL decode failed.");
+      }
+      const fixtureBytes = await fetch("./fixtures/rgb-lzms.qlic")
+        .then(response => response.blob());
+      const blobFixture = await qlic.decodeBlob(fixtureBytes);
+      if (blobFixture.width !== fixture.width ||
+          blobFixture.height !== fixture.height) {
+        throw new Error("Blob decode failed.");
+      }
+
+      const hdrBytes = await fetch("./fixtures/hdr-u16-12-pq-rgba.qlic")
+        .then(response => response.arrayBuffer());
+      const hdr = qlic.decodeHdr(hdrBytes);
+      if (hdr.pixels.bitsPerSample !== 12 || hdr.pixels.channels !== 4 ||
+          !hdr.cicp) {
+        throw new Error("HDR browser decode failed.");
+      }
+      const hlgBytes = await fetch("./fixtures/hdr-u16-10-hlg-rgb.qlic")
+        .then(response => response.arrayBuffer());
+      const hlg = qlic.decodeHdr(hlgBytes);
+      if (hlg.pixels.bitsPerSample !== 10 || hlg.pixels.channels !== 3 ||
+          !hlg.cicp || hlg.cicp.colorPrimaries !== 9 ||
+          hlg.cicp.transferCharacteristics !== 18 ||
+          hlg.pixels.samples[11] !== 333) {
+        throw new Error("HLG browser decode failed.");
+      }
+
+      const report = {
+        protocol: location.protocol,
+        packageRoot: packageRoot.pathname,
+        wasmContentType: wasmResponse.headers.get("content-type"),
+        wasmBytes: (await wasmResponse.arrayBuffer()).byteLength,
+        encodedBytes: encoded.byteLength,
+        rgbaRoundTrip: true,
+        transparentRgbPreserved: pixels[10] === 255 && pixels[11] === 0,
+        canvasDraw: true,
+        moduleWorkerRoundTrip: true,
+        moduleWorkerDecodeAndPng: true,
+        standaloneClassicWorkerRoundTrip: true,
+        standaloneWorkerDecodeAndPng: true,
+        responsiveViewerPresent: true,
+        urlAndBlobDecode: true,
+        hdrDecode: true,
+        hlgDecode: true
+      };
+      result.dataset.status = "pass";
+      result.textContent = JSON.stringify(report, null, 2);
+    } catch (error) {
+      fail(error);
+    }
+    }
+  </script>
+</body>
+</html>

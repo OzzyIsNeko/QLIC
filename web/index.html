@@ -1,0 +1,1452 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#e7f2e9">
+  <title>QLIC</title>
+  <style>
+    :root {
+      font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+      color: #173126;
+      background: #e7f2e9;
+      font-synthesis: none;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      min-height: 100vh;
+      -webkit-text-size-adjust: 100%;
+      background:
+        radial-gradient(circle at 50% -20%, #f8fcf9 0, transparent 42rem),
+        #e7f2e9;
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+    }
+
+    .page {
+      width: min(980px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 52px 0 64px;
+    }
+
+    .intro {
+      text-align: center;
+      margin-bottom: 34px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(2.15rem, 6vw, 3rem);
+      font-weight: 650;
+      letter-spacing: -0.045em;
+    }
+
+    .subtitle {
+      margin: 8px 0 0;
+      color: #527064;
+      font-size: 1rem;
+    }
+
+    .card {
+      border: 1px solid #c7dbce;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.88);
+      box-shadow: 0 16px 44px rgba(45, 79, 61, 0.07);
+    }
+
+    .input-card {
+      padding: 20px;
+      transition: border-color 140ms ease, background 140ms ease;
+    }
+
+    .input-card.dragging {
+      border-color: #5b8a70;
+      background: #fbfefc;
+    }
+
+    .label {
+      margin: 0 0 11px;
+      color: #37624d;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.075em;
+    }
+
+    .picker-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+    }
+
+    .file-field {
+      display: flex;
+      min-width: 0;
+      min-height: 46px;
+      align-items: center;
+      padding: 0 14px;
+      overflow: hidden;
+      border: 1px solid #d8e6dc;
+      border-radius: 10px;
+      background: #f3f8f4;
+      color: #49665a;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .file-field.has-file {
+      color: #173126;
+    }
+
+    .button {
+      min-height: 46px;
+      padding: 0 20px;
+      border-radius: 10px;
+      cursor: pointer;
+      touch-action: manipulation;
+      transition: background 140ms ease, border-color 140ms ease,
+        color 140ms ease, transform 80ms ease;
+    }
+
+    .button:active:not(:disabled) {
+      transform: translateY(1px);
+    }
+
+    .button:focus-visible,
+    .input-card:focus-visible {
+      outline: 3px solid rgba(61, 115, 85, 0.24);
+      outline-offset: 2px;
+    }
+
+    .secondary {
+      border: 1px solid #bdd3c5;
+      background: #f8fcf9;
+      color: #28543e;
+    }
+
+    .secondary:hover:not(:disabled) {
+      border-color: #7fa68e;
+      background: #ffffff;
+    }
+
+    .primary {
+      background: #4f7e65;
+      color: #ffffff;
+      font-weight: 600;
+    }
+
+    .primary:hover:not(:disabled) {
+      background: #426e58;
+    }
+
+    .button:disabled {
+      cursor: default;
+      opacity: 0.48;
+    }
+
+    .button.compact {
+      min-height: 40px;
+      padding: 0 14px;
+    }
+
+    .input-details {
+      min-height: 22px;
+      margin: 10px 0 0;
+      color: #607a6e;
+      font-size: 0.875rem;
+    }
+
+    .more {
+      margin-top: 14px;
+      padding: 14px 18px;
+    }
+
+    .more summary {
+      cursor: pointer;
+      color: #28543e;
+      font-weight: 600;
+    }
+
+    .more p {
+      margin: 12px 0 0;
+      color: #607a6e;
+      font-size: 0.875rem;
+      line-height: 1.45;
+    }
+
+    .actions {
+      display: flex;
+      min-height: 72px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .status {
+      margin: 0;
+      color: #527064;
+      font-size: 0.9rem;
+    }
+
+    .status.error {
+      color: #9b3f3f;
+    }
+
+    .progress {
+      height: 3px;
+      overflow: hidden;
+      border-radius: 99px;
+      background: #d5e6da;
+      opacity: 0;
+    }
+
+    .progress.visible {
+      opacity: 1;
+    }
+
+    .progress::after {
+      display: block;
+      width: 36%;
+      height: 100%;
+      border-radius: inherit;
+      background: #5d8d72;
+      content: "";
+      animation: progress 1s ease-in-out infinite;
+    }
+
+    @keyframes progress {
+      from {
+        transform: translateX(-110%);
+      }
+      to {
+        transform: translateX(310%);
+      }
+    }
+
+    .result-card {
+      min-height: 218px;
+      padding: 20px;
+    }
+
+    .result-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      align-items: end;
+    }
+
+    .result {
+      margin: 4px 0 0;
+      font-size: clamp(2rem, 7vw, 2.75rem);
+      font-weight: 640;
+      letter-spacing: -0.04em;
+    }
+
+    .result.placeholder {
+      color: #8aa095;
+      font-size: 1.15rem;
+      font-weight: 500;
+      letter-spacing: 0;
+    }
+
+    .details {
+      display: grid;
+      grid-template-columns: auto auto;
+      width: max-content;
+      max-width: 100%;
+      gap: 5px 22px;
+      margin: 22px 0 0;
+      color: #49665a;
+      font-size: 0.9rem;
+    }
+
+    .details dt,
+    .details dd {
+      margin: 0;
+    }
+
+    .details dd {
+      color: #173126;
+      text-align: right;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .viewer-card {
+      margin-top: 20px;
+      padding: 20px;
+    }
+
+    .viewer-head,
+    .viewer-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .viewer-meta {
+      margin: 0;
+      color: #49665a;
+      font-size: 0.9rem;
+    }
+
+    .viewer-controls,
+    .frame-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .viewer-controls .button {
+      min-width: 52px;
+    }
+
+    .viewer {
+      position: relative;
+      height: min(62vh, 620px);
+      min-height: 320px;
+      margin-top: 16px;
+      overflow: auto;
+      border: 1px solid #cadbd0;
+      border-radius: 12px;
+      background: #dfe8e2;
+      cursor: grab;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+      touch-action: none;
+      user-select: none;
+    }
+
+    .viewer.dragging {
+      cursor: grabbing;
+    }
+
+    .canvas-stage {
+      position: relative;
+      width: 1px;
+      height: 1px;
+      margin: 16px;
+    }
+
+    #previewCanvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      background-color: #ffffff;
+      background-image:
+        linear-gradient(45deg, #d9dedb 25%, transparent 25%),
+        linear-gradient(-45deg, #d9dedb 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #d9dedb 75%),
+        linear-gradient(-45deg, transparent 75%, #d9dedb 75%);
+      background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+      background-size: 16px 16px;
+      image-rendering: pixelated;
+    }
+
+    .pixel-grid {
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(to right, rgba(23, 49, 38, 0.22) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(23, 49, 38, 0.22) 1px, transparent 1px);
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .pixel-grid.visible {
+      opacity: 1;
+    }
+
+    .viewer-footer {
+      margin-top: 14px;
+    }
+
+    .pixel-info {
+      min-width: 0;
+      color: #28543e;
+      font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+      font-size: 0.82rem;
+      overflow-wrap: anywhere;
+    }
+
+    .frame-label {
+      min-width: 5.5rem;
+      color: #49665a;
+      font-size: 0.85rem;
+      text-align: center;
+    }
+
+    .preview-note {
+      margin: 12px 0 0;
+      color: #607a6e;
+      font-size: 0.82rem;
+      line-height: 1.45;
+    }
+
+    #file {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+
+    @media (max-width: 620px) {
+      .page {
+        width: min(100% - 16px, 980px);
+        padding: 26px 0 40px;
+      }
+
+      .picker-row,
+      .result-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .picker-row .button,
+      .actions .button,
+      .result-layout .button {
+        width: 100%;
+      }
+
+      .actions {
+        flex-direction: column;
+        align-items: stretch;
+        padding: 14px 0;
+      }
+
+      .status {
+        min-height: 20px;
+      }
+
+      .result-card {
+        min-height: 260px;
+      }
+
+      .input-card,
+      .result-card,
+      .viewer-card {
+        padding: 16px;
+      }
+
+      .viewer-head,
+      .viewer-footer {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .viewer-controls {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+      }
+
+      .viewer-controls .button,
+      #savePng {
+        width: 100%;
+      }
+
+      .viewer {
+        height: 54svh;
+        min-height: 260px;
+      }
+
+      .frame-controls {
+        justify-content: space-between;
+      }
+    }
+
+    @media (pointer: coarse) {
+      .button {
+        min-height: 48px;
+      }
+    }
+
+    @media (max-height: 520px) and (orientation: landscape) {
+      .viewer {
+        height: 68vh;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .button,
+      .input-card {
+        transition: none;
+      }
+
+      .progress::after {
+        animation-duration: 2.5s;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="intro">
+      <h1>QLIC</h1>
+      <p class="subtitle">Quick Lossless Image Codec</p>
+    </header>
+
+    <section
+      id="dropZone"
+      class="card input-card"
+      tabindex="0"
+      aria-label="Choose or drop an image or QLIC file"
+    >
+      <p class="label">FILE</p>
+      <div class="picker-row">
+        <div id="fileName" class="file-field">No file selected</div>
+        <button id="choose" class="button secondary" type="button">
+          Choose file
+        </button>
+      </div>
+      <p id="inputDetails" class="input-details">
+        Drop an image or QLIC file
+      </p>
+      <input
+        id="file"
+        type="file"
+        tabindex="-1"
+        aria-hidden="true"
+        accept=".qlic,image/qlic,image/png,image/webp,image/bmp,.png,.webp,.bmp"
+      >
+    </section>
+
+    <details class="card more">
+      <summary>Advanced settings</summary>
+      <p>
+        QLIC runs in WebAssembly in this browser; this is offline and nothing
+        leaves your device. Image input is rendered to RGBA8. RGBA8 QLIC files
+        keep animation and hidden RGB when exported to a PNG. Wide and HDR files
+        use a labeled 8-bit SDR preview instead. Use the API or native app if you
+        need exact samples.
+      </p>
+    </details>
+
+    <div class="actions">
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+      <button id="compress" class="button primary" type="button" disabled>
+        Compress
+      </button>
+    </div>
+
+    <div id="progress" class="progress" aria-hidden="true"></div>
+
+    <section id="resultCard" class="card result-card">
+      <p class="label">QLIC RESULT</p>
+      <div class="result-layout">
+        <div>
+          <p id="result" class="result placeholder">No result</p>
+          <dl id="details" class="details hidden">
+            <dt>Original file</dt>
+            <dd id="originalSize"></dd>
+            <dt>QLIC file</dt>
+            <dd id="qlicSize"></dd>
+            <dt>Encode time</dt>
+            <dd id="encodeTime"></dd>
+          </dl>
+        </div>
+        <button id="save" class="button secondary" type="button" disabled>
+          Save QLIC
+        </button>
+      </div>
+    </section>
+
+    <section
+      id="viewerCard"
+      class="card viewer-card hidden"
+      aria-labelledby="viewerHeading"
+    >
+      <div class="viewer-head">
+        <div>
+          <p id="viewerHeading" class="label">QLIC VIEWER</p>
+          <p id="viewerMeta" class="viewer-meta"></p>
+        </div>
+        <div class="viewer-controls" aria-label="Zoom controls">
+          <button id="zoomOut" class="button secondary compact" type="button" aria-label="Zoom out">−</button>
+          <button id="zoomFit" class="button secondary compact" type="button">Fit</button>
+          <button id="zoomIn" class="button secondary compact" type="button" aria-label="Zoom in">+</button>
+        </div>
+      </div>
+      <div
+        id="viewer"
+        class="viewer"
+        tabindex="0"
+        aria-label="Decoded image"
+        aria-describedby="viewerHelp previewNote"
+      >
+        <div id="canvasStage" class="canvas-stage">
+          <canvas id="previewCanvas"></canvas>
+          <div id="pixelGrid" class="pixel-grid" aria-hidden="true"></div>
+        </div>
+      </div>
+      <div class="viewer-footer">
+        <output id="pixelInfo" class="pixel-info">
+          Point at the image to inspect a pixel.
+        </output>
+        <div id="frameControls" class="frame-controls hidden">
+          <button id="previousFrame" class="button secondary compact" type="button" aria-label="Previous frame">‹</button>
+          <button id="playFrames" class="button secondary compact" type="button">Play</button>
+          <button id="nextFrame" class="button secondary compact" type="button" aria-label="Next frame">›</button>
+          <span id="frameLabel" class="frame-label"></span>
+        </div>
+        <button id="savePng" class="button secondary" type="button">
+          Save PNG
+        </button>
+      </div>
+      <p id="viewerHelp" class="preview-note">
+        Wheel or +/− zooms. Drag to pan. On touch, drag or pinch.
+      </p>
+      <p id="previewNote" class="preview-note"></p>
+    </section>
+  </main>
+
+  <script id="qlic-standalone-module" type="application/octet-stream">__QLIC_WEB_MODULE_BASE64__</script>
+  <script id="qlic-standalone-wasm" type="application/octet-stream">__QLIC_WEB_WASM_BASE64__</script>
+  <script id="qlic-standalone-worker" type="application/octet-stream">__QLIC_WEB_WORKER_BASE64__</script>
+  <script type="module">
+    const fileInput = document.getElementById("file");
+    const chooseButton = document.getElementById("choose");
+    const compressButton = document.getElementById("compress");
+    const saveButton = document.getElementById("save");
+    const dropZone = document.getElementById("dropZone");
+    const fileName = document.getElementById("fileName");
+    const inputDetails = document.getElementById("inputDetails");
+    const status = document.getElementById("status");
+    const progress = document.getElementById("progress");
+    const resultCard = document.getElementById("resultCard");
+    const result = document.getElementById("result");
+    const details = document.getElementById("details");
+    const originalSize = document.getElementById("originalSize");
+    const qlicSize = document.getElementById("qlicSize");
+    const encodeTime = document.getElementById("encodeTime");
+    const viewerCard = document.getElementById("viewerCard");
+    const viewerMeta = document.getElementById("viewerMeta");
+    const viewer = document.getElementById("viewer");
+    const canvasStage = document.getElementById("canvasStage");
+    const previewCanvas = document.getElementById("previewCanvas");
+    const pixelGrid = document.getElementById("pixelGrid");
+    const pixelInfo = document.getElementById("pixelInfo");
+    const zoomOutButton = document.getElementById("zoomOut");
+    const zoomFitButton = document.getElementById("zoomFit");
+    const zoomInButton = document.getElementById("zoomIn");
+    const frameControls = document.getElementById("frameControls");
+    const previousFrameButton = document.getElementById("previousFrame");
+    const playFramesButton = document.getElementById("playFrames");
+    const nextFrameButton = document.getElementById("nextFrame");
+    const frameLabel = document.getElementById("frameLabel");
+    const savePngButton = document.getElementById("savePng");
+    const previewNote = document.getElementById("previewNote");
+    let source = null;
+    let output = null;
+    let decoded = null;
+    let busy = false;
+    let nextJob = 1;
+    let activeJob = null;
+    let worker = null;
+    let workerObjectUrl = null;
+    let currentFrame = 0;
+    let zoom = 1;
+    let fitZoom = true;
+    let animationTimer = 0;
+    let playing = false;
+    let completedLoops = 0;
+    let resizeFrame = 0;
+    const pointers = new Map();
+    let gesture = null;
+    const openedAsLocalFile = location.protocol === "file:";
+    const standaloneModule = document.getElementById("qlic-standalone-module")
+      .textContent.trim();
+    const standaloneWasm = document.getElementById("qlic-standalone-wasm")
+      .textContent.trim();
+    const standaloneWorker = document.getElementById("qlic-standalone-worker")
+      .textContent.trim();
+    const standaloneAvailable = standaloneModule.length > 100 &&
+      standaloneWasm.length > 100 && standaloneWorker.length > 100;
+
+    const decodeBase64 = encoded => {
+      const binary = atob(encoded);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index++)
+        bytes[index] = binary.charCodeAt(index);
+      return bytes;
+    };
+
+    const standaloneWorkerSource = () => {
+      const moduleSource = new TextDecoder().decode(decodeBase64(standaloneModule));
+      const workerSource = new TextDecoder().decode(decodeBase64(standaloneWorker));
+      return [
+        "const qlicStandaloneWasm = (() => {",
+        `  const binary = atob(${JSON.stringify(standaloneWasm)});`,
+        "  const bytes = new Uint8Array(binary.length);",
+        "  for (let index = 0; index < binary.length; index++)",
+        "    bytes[index] = binary.charCodeAt(index);",
+        "  return bytes;",
+        "})();",
+        moduleSource,
+        workerSource
+      ].join("\n");
+    };
+
+    const formatSize = bytes => {
+      if (bytes < 1024) return `${bytes} bytes`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+    };
+
+    const formatDuration = milliseconds => milliseconds < 10
+      ? `${milliseconds.toFixed(2)} ms`
+      : `${(milliseconds / 1000).toFixed(2)} seconds`;
+
+    const baseName = name => {
+      const dot = name.lastIndexOf(".");
+      return (dot > 0 ? name.slice(0, dot) : name) || "image";
+    };
+
+    const qlicName = name => `${baseName(name)}.qlic`;
+
+    const pngName = name => {
+      const suffix = decoded && decoded.frames.length > 1
+        ? `-${currentFrame + 1}`
+        : "";
+      return `${baseName(name)}${suffix}.png`;
+    };
+
+    const setStatus = (message, error = false) => {
+      status.textContent = message;
+      status.classList.toggle("error", error);
+    };
+
+    const resetResult = () => {
+      output = null;
+      result.textContent = "No result";
+      result.classList.add("placeholder");
+      details.classList.add("hidden");
+      saveButton.disabled = true;
+    };
+
+    const stopPlayback = () => {
+      clearTimeout(animationTimer);
+      animationTimer = 0;
+      playing = false;
+      completedLoops = 0;
+      playFramesButton.textContent = "Play";
+    };
+
+    const resetViewer = () => {
+      stopPlayback();
+      decoded = null;
+      currentFrame = 0;
+      viewerCard.classList.add("hidden");
+      previewCanvas.width = 1;
+      previewCanvas.height = 1;
+      pixelInfo.textContent = "Point at the image to inspect a pixel.";
+      savePngButton.disabled = true;
+    };
+
+    const setBusy = (value, action = "") => {
+      busy = value;
+      chooseButton.disabled = value;
+      compressButton.disabled = value || !source || source.kind !== "image";
+      saveButton.disabled = value || !output;
+      savePngButton.disabled = value || !decoded;
+      compressButton.textContent = value && action === "encode"
+        ? "Compressing..." : "Compress";
+      savePngButton.textContent = value && action === "png"
+        ? "Saving..." : "Save PNG";
+      progress.classList.toggle("visible", value);
+    };
+
+    const readU32 = (bytes, offset) =>
+      bytes[offset] |
+      bytes[offset + 1] << 8 |
+      bytes[offset + 2] << 16 |
+      bytes[offset + 3] << 24;
+
+    const knownLossy = async file => {
+      const lower = file.name.toLowerCase();
+      if (file.type === "image/jpeg" ||
+          lower.endsWith(".jpg") ||
+          lower.endsWith(".jpeg") ||
+          lower.endsWith(".jpe")) {
+        return true;
+      }
+      const bytes = new Uint8Array(
+        await file.slice(0, Math.min(file.size, 1024 * 1024)).arrayBuffer()
+      );
+      if (bytes.length >= 3 &&
+          bytes[0] === 0xff &&
+          bytes[1] === 0xd8 &&
+          bytes[2] === 0xff) {
+        return true;
+      }
+      if (bytes.length < 20 ||
+          String.fromCharCode(...bytes.subarray(0, 4)) !== "RIFF" ||
+          String.fromCharCode(...bytes.subarray(8, 12)) !== "WEBP") {
+        return false;
+      }
+      let offset = 12;
+      while (offset + 8 <= bytes.length) {
+        const tag = String.fromCharCode(...bytes.subarray(offset, offset + 4));
+        const size = readU32(bytes, offset + 4) >>> 0;
+        if (tag === "VP8 ") return true;
+        if (tag === "VP8L") return false;
+        const next = offset + 8 + size + (size & 1);
+        if (next <= offset || next > bytes.length) break;
+        offset = next;
+      }
+      return false;
+    };
+
+    const isQlicFile = async file => {
+      const lower = file.name.toLowerCase();
+      if (file.type === "image/qlic" || lower.endsWith(".qlic")) return true;
+      const magic = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+      return magic.length === 4 &&
+        magic[0] === 0x51 && magic[1] === 0x4c &&
+        magic[2] === 0x49 && magic[3] === 0x43;
+    };
+
+    const decodeImage = async file => {
+      let bitmap;
+      try {
+        bitmap = await createImageBitmap(file, {
+          imageOrientation: "from-image",
+          premultiplyAlpha: "none"
+        });
+      } catch {
+        try {
+          bitmap = await createImageBitmap(file);
+        } catch {
+          throw new Error(
+            "This browser could not decode the image. Use PNG, BMP, or lossless WebP."
+          );
+        }
+      }
+      try {
+        if (!bitmap.width || !bitmap.height ||
+            bitmap.width * bitmap.height > 33554432) {
+          throw new Error("This image is too large for the browser app.");
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        const context = canvas.getContext("2d", {
+          alpha: true,
+          willReadFrequently: true
+        });
+        if (!context) throw new Error("The browser could not read this image.");
+        context.drawImage(bitmap, 0, 0);
+        const image = context.getImageData(0, 0, bitmap.width, bitmap.height);
+        return {
+          file,
+          width: bitmap.width,
+          height: bitmap.height,
+          pixels: new Uint8Array(image.data)
+        };
+      } finally {
+        bitmap.close();
+      }
+    };
+
+    const selectFile = async file => {
+      if (!file || busy) return;
+      if (openedAsLocalFile && !standaloneAvailable) {
+        setStatus(
+          "Serve this folder over HTTP or HTTPS; no QLIC executable is required.",
+          true
+        );
+        return;
+      }
+      source = null;
+      resetResult();
+      resetViewer();
+      resultCard.classList.remove("hidden");
+      compressButton.classList.remove("hidden");
+      compressButton.disabled = true;
+      fileName.textContent = file.name;
+      fileName.classList.add("has-file");
+      inputDetails.textContent = "Reading file...";
+      setStatus("");
+      setBusy(true, "read");
+      try {
+        if (!file.size || file.size > 268435456)
+          throw new Error("This file is too large for the browser app.");
+        if (await isQlicFile(file)) {
+          inputDetails.textContent = "Decoding QLIC...";
+          source = { kind: "qlic", file };
+          const decodedFile = await decodeQlic(file);
+          showViewer(decodedFile.decoded);
+          resultCard.classList.add("hidden");
+          compressButton.classList.add("hidden");
+          inputDetails.textContent =
+            `${decoded.width} × ${decoded.height}, QLIC file ${formatSize(file.size)}`;
+          setStatus(`Decoded in ${formatDuration(decodedFile.elapsed)}.`);
+          return;
+        }
+        if (await knownLossy(file))
+          throw new Error("This image is known to be lossy, so it was not accepted.");
+        source = { kind: "image", ...(await decodeImage(file)) };
+        inputDetails.textContent =
+          `${source.width} × ${source.height}, original file ${formatSize(file.size)}`;
+        setStatus("Ready");
+      } catch (error) {
+        source = null;
+        resetViewer();
+        inputDetails.textContent = "The file could not be opened.";
+        setStatus(error.message || String(error), true);
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const disposeWorker = () => {
+      const current = worker;
+      worker = null;
+      if (current) current.terminate();
+      if (workerObjectUrl) {
+        URL.revokeObjectURL(workerObjectUrl);
+        workerObjectUrl = null;
+      }
+    };
+
+    const workerFailed = event => {
+      disposeWorker();
+      if (!activeJob) return;
+      const job = activeJob;
+      activeJob = null;
+      const detail = event && typeof event.message === "string"
+        ? event.message.trim()
+        : "";
+      job.reject(new Error(
+        openedAsLocalFile && !standaloneAvailable
+          ? "Serve this folder over HTTP or HTTPS before using QLIC."
+          : detail
+            ? `The browser codec worker stopped: ${detail}`
+            : "The browser codec worker stopped."
+      ));
+    };
+
+    const getWorker = () => {
+      if (worker) return worker;
+      try {
+        if (standaloneAvailable) {
+          workerObjectUrl = URL.createObjectURL(new Blob(
+            [standaloneWorkerSource()],
+            { type: "text/javascript" }
+          ));
+          worker = new Worker(workerObjectUrl, { name: "QLIC codec" });
+        } else {
+          worker = new Worker(
+            new URL("./qlic-worker.js", import.meta.url),
+            { type: "module", name: "QLIC codec" }
+          );
+        }
+      } catch {
+        disposeWorker();
+        throw new Error(
+          openedAsLocalFile && !standaloneAvailable
+            ? "Serve this folder over HTTP or HTTPS before using QLIC."
+            : "The browser codec worker could not start."
+        );
+      }
+      worker.addEventListener("message", event => {
+        const message = event.data;
+        if (!activeJob || !message || message.id !== activeJob.id) return;
+        const job = activeJob;
+        activeJob = null;
+        if (message.ok) job.resolve(message);
+        else {
+          disposeWorker();
+          job.reject(new Error(message.error || "QLIC operation failed."));
+        }
+      });
+      worker.addEventListener("error", workerFailed);
+      worker.addEventListener("messageerror", workerFailed);
+      return worker;
+    };
+
+    window.addEventListener("pagehide", disposeWorker);
+
+    if (openedAsLocalFile && !standaloneAvailable) {
+      chooseButton.disabled = true;
+      inputDetails.textContent = "Open the built index.html in web/dist or dist/qlic-web.";
+      setStatus(
+        "This source template is not the packaged offline app. Run scripts/build-web.ps1 first.",
+        true
+      );
+    }
+
+    const requestWorker = (message, transfer) => new Promise((resolve, reject) => {
+      if (activeJob) {
+        reject(new Error("Another QLIC operation is still running."));
+        return;
+      }
+      const id = nextJob++;
+      activeJob = { id, resolve, reject };
+      try {
+        getWorker().postMessage({ id, ...message }, transfer);
+      } catch (error) {
+        activeJob = null;
+        disposeWorker();
+        reject(error);
+      }
+    });
+
+    const encode = async image => {
+      const pixels = image.pixels.slice();
+      const message = await requestWorker({
+        operation: "encode",
+        rgba: pixels.buffer,
+        width: image.width,
+        height: image.height
+      }, [pixels.buffer]);
+      return {
+        bytes: new Uint8Array(message.encoded),
+        elapsed: message.elapsed
+      };
+    };
+
+    const decodeQlic = async file => {
+      const input = new Uint8Array(await file.arrayBuffer());
+      const message = await requestWorker({
+        operation: "decode",
+        input: input.buffer
+      }, [input.buffer]);
+      for (const frame of message.decoded.frames) {
+        if (!(frame.rgba instanceof Uint8ClampedArray))
+          frame.rgba = new Uint8ClampedArray(frame.rgba);
+      }
+      return { decoded: message.decoded, elapsed: message.elapsed };
+    };
+
+    const encodePng = async frame => {
+      const rgba = new Uint8Array(frame.rgba);
+      const message = await requestWorker({
+        operation: "png",
+        rgba: rgba.buffer,
+        width: frame.width,
+        height: frame.height
+      }, [rgba.buffer]);
+      return new Uint8Array(message.png);
+    };
+
+    const frameAt = () => decoded && decoded.frames[currentFrame];
+
+    const zoomBounds = frame => {
+      const longest = Math.max(frame.width, frame.height);
+      return {
+        minimum: Math.max(0.000001, Math.min(1 / 64, 256 / longest)),
+        maximum: Math.max(0.000001, Math.min(64, 1048576 / longest))
+      };
+    };
+
+    const updateStage = () => {
+      const frame = frameAt();
+      if (!frame) return;
+      const width = frame.width * zoom;
+      const height = frame.height * zoom;
+      canvasStage.style.width = `${width}px`;
+      canvasStage.style.height = `${height}px`;
+      canvasStage.style.marginLeft = `${Math.max(16, (viewer.clientWidth - width) / 2)}px`;
+      canvasStage.style.marginTop = `${Math.max(16, (viewer.clientHeight - height) / 2)}px`;
+      canvasStage.style.marginRight = "16px";
+      canvasStage.style.marginBottom = "16px";
+      pixelGrid.style.backgroundSize = `${zoom}px ${zoom}px`;
+      pixelGrid.classList.toggle("visible", zoom >= 8);
+      zoomFitButton.textContent = `Fit ${Math.round(zoom * 100)}%`;
+    };
+
+    const setZoom = (value, clientX, clientY, fitting = false) => {
+      const frame = frameAt();
+      if (!frame) return;
+      const bounds = zoomBounds(frame);
+      const next = Math.min(bounds.maximum, Math.max(bounds.minimum, value));
+      const viewRect = viewer.getBoundingClientRect();
+      const canvasRect = previewCanvas.getBoundingClientRect();
+      const anchored = Number.isFinite(clientX) && Number.isFinite(clientY);
+      const viewX = anchored ? clientX - viewRect.left : viewer.clientWidth / 2;
+      const viewY = anchored ? clientY - viewRect.top : viewer.clientHeight / 2;
+      const sourceX = canvasRect.width
+        ? (anchored
+          ? (clientX - canvasRect.left) / zoom
+          : (viewer.scrollLeft + viewX - canvasStage.offsetLeft) / zoom)
+        : frame.width / 2;
+      const sourceY = canvasRect.height
+        ? (anchored
+          ? (clientY - canvasRect.top) / zoom
+          : (viewer.scrollTop + viewY - canvasStage.offsetTop) / zoom)
+        : frame.height / 2;
+      zoom = next;
+      fitZoom = fitting;
+      updateStage();
+      viewer.scrollLeft = canvasStage.offsetLeft + sourceX * zoom - viewX;
+      viewer.scrollTop = canvasStage.offsetTop + sourceY * zoom - viewY;
+    };
+
+    const fitViewer = () => {
+      const frame = frameAt();
+      if (!frame || !viewer.clientWidth || !viewer.clientHeight) return;
+      const value = Math.min(
+        Math.max(1, viewer.clientWidth - 32) / frame.width,
+        Math.max(1, viewer.clientHeight - 32) / frame.height
+      );
+      zoom = Math.min(zoomBounds(frame).maximum, Math.max(zoomBounds(frame).minimum, value));
+      fitZoom = true;
+      updateStage();
+      viewer.scrollLeft = canvasStage.offsetLeft + frame.width * zoom / 2 -
+        viewer.clientWidth / 2;
+      viewer.scrollTop = canvasStage.offsetTop + frame.height * zoom / 2 -
+        viewer.clientHeight / 2;
+    };
+
+    const drawFrame = index => {
+      if (!decoded || !decoded.frames.length) return;
+      currentFrame = (index + decoded.frames.length) % decoded.frames.length;
+      const frame = frameAt();
+      if (!(frame.rgba instanceof Uint8ClampedArray) ||
+          frame.rgba.length !== frame.width * frame.height * 4) {
+        throw new Error("QLIC returned an invalid preview frame.");
+      }
+      previewCanvas.width = frame.width;
+      previewCanvas.height = frame.height;
+      const context = previewCanvas.getContext("2d", { alpha: true });
+      if (!context) throw new Error("The browser could not display this image.");
+      context.putImageData(new ImageData(frame.rgba, frame.width, frame.height), 0, 0);
+      frameLabel.textContent = `Frame ${currentFrame + 1} / ${decoded.frames.length}`;
+      pixelInfo.textContent = "Point at the image to inspect a pixel.";
+      if (fitZoom) requestAnimationFrame(fitViewer);
+      else updateStage();
+    };
+
+    const showViewer = value => {
+      if (!value || !Number.isInteger(value.width) || !Number.isInteger(value.height) ||
+          value.width < 1 || value.height < 1 || !Array.isArray(value.frames) ||
+          !value.frames.length) {
+        throw new Error("QLIC returned an invalid image.");
+      }
+      decoded = value;
+      currentFrame = 0;
+      fitZoom = true;
+      const color = value.channels === 1 ? "Gray" : value.channels === 3 ? "RGB" : "RGBA";
+      const format = value.kind === "hdr"
+        ? `${value.transfer || "HDR"} ${color} ${value.bitsPerSample}-bit`
+        : value.kind === "wide"
+          ? `${color} ${value.bitsPerSample}-bit`
+          : "RGBA8";
+      const frames = value.frames.length > 1 ? ` · ${value.frames.length} frames` : "";
+      viewerMeta.textContent = `${value.width} × ${value.height} · ${format}${frames}`;
+      if (value.kind === "hdr") {
+        previewNote.textContent =
+          `${value.transfer || "HDR"} samples are linearly scaled into an 8-bit SDR preview; ` +
+          "no tone mapping is applied. PNG saves this preview.";
+      } else if (value.kind === "wide") {
+        previewNote.textContent =
+          "Wide samples are linearly scaled into an 8-bit preview. PNG saves this preview.";
+      } else {
+        previewNote.textContent = value.frames.length > 1
+          ? "PNG saves the current frame with its exact decoded RGBA8 pixels."
+          : "PNG preserves the exact decoded RGBA8 pixels, including RGB under zero alpha.";
+      }
+      frameControls.classList.toggle("hidden", value.frames.length < 2);
+      viewerCard.classList.remove("hidden");
+      savePngButton.disabled = false;
+      drawFrame(0);
+    };
+
+    const inspectPixel = (clientX, clientY) => {
+      const frame = frameAt();
+      if (!frame) return;
+      const rect = previewCanvas.getBoundingClientRect();
+      if (clientX < rect.left || clientY < rect.top ||
+          clientX >= rect.right || clientY >= rect.bottom) return;
+      const x = Math.min(frame.width - 1,
+        Math.floor((clientX - rect.left) * frame.width / rect.width));
+      const y = Math.min(frame.height - 1,
+        Math.floor((clientY - rect.top) * frame.height / rect.height));
+      const offset = (y * frame.width + x) * 4;
+      const rgba = frame.rgba.subarray(offset, offset + 4);
+      const hex = Array.from(rgba, value => value.toString(16).padStart(2, "0"))
+        .join("").toUpperCase();
+      pixelInfo.textContent =
+        `x ${x} · y ${y} · RGBA ${rgba[0]}, ${rgba[1]}, ${rgba[2]}, ${rgba[3]} · #${hex}`;
+    };
+
+    const scheduleFrame = () => {
+      if (!playing || !decoded) return;
+      const delay = Math.min(0x7fffffff, Math.max(1, frameAt().delay || 100));
+      animationTimer = setTimeout(() => {
+        let next = currentFrame + 1;
+        if (next >= decoded.frames.length) {
+          next = 0;
+          completedLoops++;
+          if (decoded.loopCount && completedLoops >= decoded.loopCount) {
+            stopPlayback();
+            return;
+          }
+        }
+        drawFrame(next);
+        scheduleFrame();
+      }, delay);
+    };
+
+    const togglePlayback = () => {
+      if (!decoded || decoded.frames.length < 2) return;
+      if (playing) {
+        stopPlayback();
+        return;
+      }
+      playing = true;
+      completedLoops = 0;
+      playFramesButton.textContent = "Pause";
+      scheduleFrame();
+    };
+
+    const download = (bytes, type, name) => {
+      const url = URL.createObjectURL(new Blob([bytes], { type }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+
+    const showResult = encoded => {
+      output = encoded.bytes;
+      const change = (output.length - source.file.size) * 100 / source.file.size;
+      if (change < -0.005)
+        result.textContent = `${(-change).toFixed(1)}% smaller`;
+      else if (change > 0.005)
+        result.textContent = `${change.toFixed(1)}% larger`;
+      else
+        result.textContent = "Same file size";
+      result.classList.remove("placeholder");
+      originalSize.textContent = formatSize(source.file.size);
+      qlicSize.textContent = formatSize(output.length);
+      encodeTime.textContent = formatDuration(encoded.elapsed);
+      details.classList.remove("hidden");
+    };
+
+    chooseButton.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => {
+      selectFile(fileInput.files && fileInput.files[0]);
+    });
+
+    compressButton.addEventListener("click", async () => {
+      if (!source || source.kind !== "image" || busy) return;
+      resetResult();
+      setBusy(true, "encode");
+      setStatus("Compressing...");
+      try {
+        const encoded = await encode(source);
+        showResult(encoded);
+        setStatus("Compression complete.");
+      } catch (error) {
+        result.textContent = "Compression failed";
+        result.classList.remove("placeholder");
+        setStatus(error.message || "Compression failed.", true);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    saveButton.addEventListener("click", () => {
+      if (!output || !source) return;
+      download(output, "image/qlic", qlicName(source.file.name));
+      setStatus("QLIC file saved.");
+    });
+
+    savePngButton.addEventListener("click", async () => {
+      const frame = frameAt();
+      if (!frame || !source || busy) return;
+      setBusy(true, "png");
+      setStatus("Creating PNG...");
+      try {
+        const png = await encodePng(frame);
+        download(png, "image/png", pngName(source.file.name));
+        setStatus("PNG saved.");
+      } catch (error) {
+        setStatus(error.message || "PNG export failed.", true);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    zoomOutButton.addEventListener("click", () => setZoom(zoom / 2));
+    zoomFitButton.addEventListener("click", fitViewer);
+    zoomInButton.addEventListener("click", () => setZoom(zoom * 2));
+
+    previousFrameButton.addEventListener("click", () => {
+      stopPlayback();
+      drawFrame(currentFrame - 1);
+    });
+    playFramesButton.addEventListener("click", togglePlayback);
+    nextFrameButton.addEventListener("click", () => {
+      stopPlayback();
+      drawFrame(currentFrame + 1);
+    });
+
+    viewer.addEventListener("wheel", event => {
+      if (!decoded) return;
+      event.preventDefault();
+      const units = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 :
+        event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? viewer.clientHeight : 1;
+      setZoom(zoom * Math.exp(-event.deltaY * units * 0.0015),
+        event.clientX, event.clientY);
+    }, { passive: false });
+
+    const beginGesture = () => {
+      const points = Array.from(pointers.values());
+      if (points.length === 1) {
+        gesture = {
+          kind: "pan",
+          id: points[0].id,
+          x: points[0].x,
+          y: points[0].y,
+          left: viewer.scrollLeft,
+          top: viewer.scrollTop,
+          moved: false
+        };
+      } else if (points.length >= 2) {
+        const [a, b] = points;
+        gesture = {
+          kind: "pinch",
+          distance: Math.hypot(a.x - b.x, a.y - b.y),
+          x: (a.x + b.x) / 2,
+          y: (a.y + b.y) / 2,
+          moved: true
+        };
+      } else {
+        gesture = null;
+      }
+    };
+
+    viewer.addEventListener("pointerdown", event => {
+      if (!decoded || (event.pointerType === "mouse" && event.button !== 0)) return;
+      event.preventDefault();
+      viewer.focus({ preventScroll: true });
+      pointers.set(event.pointerId, {
+        id: event.pointerId,
+        x: event.clientX,
+        y: event.clientY
+      });
+      try { viewer.setPointerCapture(event.pointerId); } catch (_) {}
+      beginGesture();
+      viewer.classList.add("dragging");
+    });
+
+    viewer.addEventListener("pointermove", event => {
+      if (!pointers.has(event.pointerId)) {
+        if (event.pointerType === "mouse") inspectPixel(event.clientX, event.clientY);
+        return;
+      }
+      event.preventDefault();
+      pointers.set(event.pointerId, {
+        id: event.pointerId,
+        x: event.clientX,
+        y: event.clientY
+      });
+      const points = Array.from(pointers.values());
+      if (points.length >= 2) {
+        if (!gesture || gesture.kind !== "pinch") beginGesture();
+        const [a, b] = points;
+        const distance = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+        const x = (a.x + b.x) / 2;
+        const y = (a.y + b.y) / 2;
+        setZoom(zoom * distance / Math.max(1, gesture.distance), gesture.x, gesture.y);
+        viewer.scrollLeft -= x - gesture.x;
+        viewer.scrollTop -= y - gesture.y;
+        gesture = { kind: "pinch", distance, x, y, moved: true };
+      } else if (gesture && gesture.kind === "pan" &&
+          gesture.id === event.pointerId) {
+        const dx = event.clientX - gesture.x;
+        const dy = event.clientY - gesture.y;
+        if (Math.abs(dx) + Math.abs(dy) > 3) gesture.moved = true;
+        viewer.scrollLeft = gesture.left - dx;
+        viewer.scrollTop = gesture.top - dy;
+      }
+    });
+
+    const endPointer = (event, inspect) => {
+      const tap = inspect && gesture && gesture.kind === "pan" &&
+        gesture.id === event.pointerId && !gesture.moved;
+      if (tap) inspectPixel(event.clientX, event.clientY);
+      pointers.delete(event.pointerId);
+      try { viewer.releasePointerCapture(event.pointerId); } catch (_) {}
+      beginGesture();
+      if (!pointers.size) viewer.classList.remove("dragging");
+    };
+    viewer.addEventListener("pointerup", event => endPointer(event, true));
+    viewer.addEventListener("pointercancel", event => endPointer(event, false));
+
+    viewer.addEventListener("keydown", event => {
+      if (!decoded) return;
+      if (["+", "="].includes(event.key)) setZoom(zoom * 2);
+      else if (["-", "_"].includes(event.key)) setZoom(zoom / 2);
+      else if (["0", "f", "F"].includes(event.key)) fitViewer();
+      else if (event.key === "ArrowLeft") viewer.scrollLeft -= 48;
+      else if (event.key === "ArrowRight") viewer.scrollLeft += 48;
+      else if (event.key === "ArrowUp") viewer.scrollTop -= 48;
+      else if (event.key === "ArrowDown") viewer.scrollTop += 48;
+      else return;
+      event.preventDefault();
+    });
+
+    const resized = () => {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(() => {
+        if (fitZoom) fitViewer();
+        else updateStage();
+      });
+    };
+    if (typeof ResizeObserver === "function")
+      new ResizeObserver(resized).observe(viewer);
+    else
+      window.addEventListener("resize", resized);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) stopPlayback();
+    });
+
+    for (const eventName of ["dragenter", "dragover"]) {
+      dropZone.addEventListener(eventName, event => {
+        event.preventDefault();
+        if (!busy) dropZone.classList.add("dragging");
+      });
+    }
+    for (const eventName of ["dragleave", "drop"]) {
+      dropZone.addEventListener(eventName, event => {
+        event.preventDefault();
+        dropZone.classList.remove("dragging");
+      });
+    }
+    dropZone.addEventListener("drop", event => {
+      const files = event.dataTransfer && event.dataTransfer.files;
+      selectFile(files && files[0]);
+    });
+    dropZone.addEventListener("keydown", event => {
+      if (event.target === dropZone &&
+          (event.key === "Enter" || event.key === " ") && !busy) {
+        event.preventDefault();
+        fileInput.click();
+      }
+    });
+  </script>
+</body>
+</html>

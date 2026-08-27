@@ -10,48 +10,45 @@ permissions:
 jobs:
   validate:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
-      # pinned revisions keep third party action changes out of release builds
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: MSVC
         shell: pwsh
-        run: .\build.ps1 -Config Release -BuildDir build\msvc
+        run: .\build.ps1 -Config Release -BuildDir build\ci-msvc
 
-      - name: Clang
+      - name: WIC registration lifecycle
         shell: pwsh
-        run: .\scripts\build-clang.ps1 -Config Release -BuildDir build\clang
+        run: |
+          & '.\tests\wic_registration_test.ps1' `
+            -Dll '.\build\ci-msvc\vs18-x64\Release\qlic-wic.dll' `
+            -Smoke '.\build\ci-msvc\vs18-x64\Release\qlic-wic-smoke.exe' `
+            -Fixture '.\tests\fixtures\rgb-lzms.qlic'
 
-      - name: AddressSanitizer
+      - name: Clang and sanitizers
         shell: pwsh
-        run: .\scripts\build-clang.ps1 -Config RelWithDebInfo -BuildDir build\asan -Sanitize
+        run: |
+          .\scripts\build-clang.ps1 -Config Release -BuildDir build\ci-clang
+          .\scripts\build-clang.ps1 -Config RelWithDebInfo -BuildDir build\ci-asan -Sanitize
+
+      - name: Rust decoder
+        shell: pwsh
+        run: .\scripts\build-rust.ps1 -Config Release
 
       - name: WebAssembly
         shell: pwsh
-        run: .\tests\test-wasm.ps1
+        run: |
+          .\scripts\build-web.ps1 -OutDir build\ci-web
+          npm install --prefix '.\build\ci-typescript' --no-save --ignore-scripts typescript@5.9.3
+          node '.\build\ci-typescript\node_modules\typescript\lib\tsc.js' --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --lib ES2022,DOM '.\tests\web_types.ts'
 
-      - name: Packages
+      - name: Local packages
         shell: pwsh
-        run: .\scripts\package.ps1 -Config Release -BuildDir build\package
+        run: .\scripts\package.ps1 -Config Release -BuildDir build\ci-package -CommunityRelease
 
-      # do not upload an archive that disagrees with its checksum manifest
-      - name: Verify packages
+      - name: Verify package manifests
         shell: pwsh
         run: |
-          $expected = Get-Content dist\SHA256SUMS.txt
-          if ($expected.Count -ne 5) { throw "Expected five release archives." }
-          foreach ($line in $expected) {
-            if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw "Invalid checksum line." }
-            $actual = (Get-FileHash "dist\archives\$($Matches[2])" -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actual -ne $Matches[1]) { throw "Checksum mismatch: $($Matches[2])" }
-          }
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: qlic-0.5.0-demo
-          path: |
-            dist/archives/*.zip
-            dist/SHA256SUMS.txt
-          if-no-files-found: error
+          & '.\tests\verify-packages.ps1' -CommunityRelease

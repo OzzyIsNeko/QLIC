@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
   for (size_t size = 0; size < compressed_size; ++size)
     (void)qlic_lzms_decompress(file + 28u, size, decoded, expected);
 
-  uint8_t sample[256];
+  uint8_t sample[256] = {0};
   uint8_t output[4096];
   uint32_t state = UINT32_C(0x6d2b79f5);
   for (unsigned pass = 0; pass < 10000u; ++pass) {

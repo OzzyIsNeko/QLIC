@@ -5,6 +5,9 @@ param(
   [ValidateSet("Off", "Generate", "Use")]
   [string]$Pgo = "Off",
   [string]$PgoProfile = "",
+  [switch]$Native,
+  [switch]$StreamTrace,
+  [switch]$BenchmarkTrial,
   [switch]$Sanitize,
   [switch]$SkipTests
 )
@@ -45,7 +48,10 @@ $testCommand = if ($SkipTests) { "" } else { " && ctest --test-dir `"$out`" -C `
 $sanitizeOption = if ($Sanitize) { "ON" } else { "OFF" }
 $pgoOption = $Pgo.ToUpperInvariant()
 $profileOption = if ($PgoProfile) { " -D QLIC_PGO_PROFILE=`"$PgoProfile`"" } else { "" }
-$command = "call `"$vcvars`" >nul && cmake -S `"$root`" -B `"$out`" -G `"NMake Makefiles`" -D CMAKE_C_COMPILER=`"$clang`" -D CMAKE_BUILD_TYPE=`"$Config`" -D BUILD_TESTING=ON -D QLIC_SANITIZE=$sanitizeOption -D QLIC_PGO=$pgoOption$profileOption && cmake --build `"$out`" --parallel$testCommand"
+$nativeOption = if ($Native) { "ON" } else { "OFF" }
+$streamTraceOption = if ($StreamTrace) { "ON" } else { "OFF" }
+$benchmarkTrialOption = if ($BenchmarkTrial) { "ON" } else { "OFF" }
+$command = "call `"$vcvars`" >nul && cmake -S `"$root`" -B `"$out`" -G `"NMake Makefiles`" -D CMAKE_C_COMPILER=`"$clang`" -D CMAKE_BUILD_TYPE=`"$Config`" -D BUILD_TESTING=ON -D QLIC_SANITIZE=$sanitizeOption -D QLIC_PGO=$pgoOption -D QLIC_NATIVE=$nativeOption -D QLIC_STREAM_TRACE=$streamTraceOption -D QLIC_BENCHMARK_TRIAL=$benchmarkTrialOption$profileOption && cmake --build `"$out`" --parallel$testCommand"
 cmd /d /s /c $command
 if ($LASTEXITCODE -ne 0) { throw "Clang build or tests failed." }
 

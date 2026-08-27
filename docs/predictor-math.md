@@ -23,6 +23,24 @@ The filters are:
 
 All additions wrap to one byte. The encoder chooses the filter with the lowest estimated residual cost.
 
+## Planar median-edge residual
+
+The outer blue-delta planar transform uses the causal median-edge predictor on
+each byte plane. With left `L`, up `U`, and upper-left `UL`:
+
+```text
+low  = min(L, U)
+high = max(L, U)
+pred = clamp(L + U - UL, low, high)
+sample = residual + pred  (mod 256)
+```
+
+Missing neighbors on the top and left edges are zero. Therefore the first row
+is a byte prefix sum and the first column predicts directly from above. The
+decoder specializes those edges and fuses reconstruction of the B, R-B, G-B,
+and optional alpha planes with final RGBA emission, leaving no boundary branch
+in the interior hot loop.
+
 ## Color transforms
 
 Every color transform is reversible.
@@ -72,6 +90,74 @@ R
 G - R + 256
 B - floor((R + G) / 2) + 256
 ```
+
+Native transforms 36 and 37 fill the two measured blue-anchor gaps with a
+fixed 40/24 blend:
+
+```text
+36: B, R - B + 256, G - floor((40*R + 24*B) / 64) + 256
+37: B, G - B + 256, R - floor((40*G + 24*B) / 64) + 256
+```
+
+The encoder selects either transform only when the existing sampled residual
+score beats the best transform through 35 by at least 0.7%. No additional
+full encode trial is added.
+
+Native transform 38 models the quadratic blue relation in tangent-space normal
+maps. Define:
+
+```text
+x = R - 128
+y = G - 128
+q = max(128, 255 - floor((x*x + y*y + 127) / 256))
+```
+
+The stored planes are:
+
+```text
+R
+G + 128
+B - q + 256
+```
+
+They occupy exact ranges 0 through 255, 128 through 383, and 1 through 383.
+Decoding restores `G` by subtracting 128, recomputes `q` from `R` and `G`, and
+adds it back to the third plane. The inverse costs two bounded integer
+multiplications per pixel. The encoder samples this candidate in the existing
+transform pass, requires at least a 1.0% residual-score lead over the ordinary
+winner, and still accepts it only after a completed mode-52 stream is strictly
+smaller.
+
+Native transform 39 keeps the same plane layout and replaces `q` with a
+closer integer approximation of the spherical tangent-space relation:
+
+```text
+r2 = x*x + y*y
+q = 128                                      when r2 >= 127*127
+q = 255 - floor((r2 + 127) / 256) - C[r2/256] otherwise
+```
+
+`C` is a fixed 64-byte correction table. The radius check bounds its index,
+and decoding remains integer-only with the same two multiplications per pixel.
+The encoder samples transform 39 beside the existing transform scores, requires
+at least a 0.75% lead over the best current score including transform 38, and
+then accepts it only when the complete mode-52 stream is smaller. This gate was
+validated independently on Khronos glTF normal textures; it does not inspect
+paths, names, or asset categories.
+
+Native transform 40 uses the same spherical `q` but stores `G` directly:
+
+```text
+R
+G
+B - q + 256
+```
+
+The second plane is therefore eight bits instead of transform 39's centered
+nine-bit plane. The decoder does less work and the format adds no predictor,
+table, allocation, or model. This fallback is tried only when transform 39
+misses its stronger gate and its sampled score beats the best transform
+through 38; the completed stream must still be strictly smaller.
 
 Every signed division here uses mathematical floor division, including negative inputs.
 

@@ -1,0 +1,21 @@
+[package]
+name = "qlic-decoder"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0 AND MIT"
+description = "Pure Rust decoder for QLIC images"
+readme = "README.md"
+keywords = ["image", "codec", "lossless", "hdr", "wasm"]
+categories = ["multimedia::images", "encoding"]
+publish = false
+include = [
+  "src/**",
+  "examples/**",
+  "Cargo.toml",
+  "Cargo.lock",
+  "README.md",
+  "LICENSE-LZMS",
+]
+
+[dependencies]

@@ -178,25 +178,161 @@ static int is_png(const uint8_t *data, size_t size) {
   return size >= 8 && memcmp(data, signature, 8) == 0;
 }
 
+static uint32_t png_crc32(const uint8_t *data, size_t size) {
+  static const uint32_t table[16] = {
+      UINT32_C(0x00000000), UINT32_C(0x1db71064), UINT32_C(0x3b6e20c8),
+      UINT32_C(0x26d930ac), UINT32_C(0x76dc4190), UINT32_C(0x6b6b51f4),
+      UINT32_C(0x4db26158), UINT32_C(0x5005713c), UINT32_C(0xedb88320),
+      UINT32_C(0xf00f9344), UINT32_C(0xd6d6a3e8), UINT32_C(0xcb61b38c),
+      UINT32_C(0x9b64c2b0), UINT32_C(0x86d3d2d4), UINT32_C(0xa00ae278),
+      UINT32_C(0xbdbdf21c)};
+  uint32_t crc = UINT32_C(0xffffffff);
+  for (size_t index = 0; index < size; ++index) {
+    crc ^= data[index];
+    crc = table[crc & 15u] ^ (crc >> 4u);
+    crc = table[crc & 15u] ^ (crc >> 4u);
+  }
+  return crc ^ UINT32_C(0xffffffff);
+}
+
+static int png_chunk_name_valid(const uint8_t *name) {
+  for (size_t index = 0; index < 4u; ++index) {
+    uint8_t c = name[index];
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')))
+      return 0;
+  }
+  return (name[2] & 32u) == 0;
+}
+
 static int check_png(const uint8_t *data, size_t size, char *error,
                      size_t error_capacity) {
-  if (size < 29 || be32(data + 8) != 13 ||
-      memcmp(data + 12, "IHDR", 4) != 0) {
+  if (size < 33 || be32(data + 8) != 13 ||
+      memcmp(data + 12, "IHDR", 4) != 0 || !be32(data + 16) ||
+      !be32(data + 20)) {
     set_error(error, error_capacity, "the PNG header is invalid");
     return 0;
   }
   uint8_t depth = data[24];
   uint8_t color = data[25];
-  if (depth > 8) {
-    set_error(error, error_capacity,
-              "QLIC currently accepts images with up to 8 bits per channel");
-    return 0;
-  }
-  if (color != 0 && color != 2 && color != 3 && color != 4 && color != 6) {
+  int valid_depth =
+      (color == 0 && (depth == 1 || depth == 2 || depth == 4 || depth == 8 ||
+                      depth == 16)) ||
+      (color == 2 && (depth == 8 || depth == 16)) ||
+      (color == 3 && (depth == 1 || depth == 2 || depth == 4 || depth == 8)) ||
+      (color == 4 && (depth == 8 || depth == 16)) ||
+      (color == 6 && (depth == 8 || depth == 16));
+  if (!valid_depth) {
     set_error(error, error_capacity, "the PNG color format is unsupported");
     return 0;
   }
-  return 1;
+  if (data[26] != 0 || data[27] != 0 || data[28] > 1) {
+    set_error(error, error_capacity, "the PNG coding method is unsupported");
+    return 0;
+  }
+
+  size_t offset = 8u;
+  int have_header = 0;
+  int have_palette = 0;
+  int have_pixels = 0;
+  int pixels_ended = 0;
+  int have_transparency = 0;
+  uint32_t palette_entries = 0;
+  while (offset < size) {
+    if (size - offset < 12u) {
+      set_error(error, error_capacity, "the PNG chunk layout is invalid");
+      return 0;
+    }
+    uint32_t length = be32(data + offset);
+    if (length > UINT32_C(0x7fffffff) ||
+        (size_t)length > size - offset - 12u) {
+      set_error(error, error_capacity, "the PNG chunk layout is invalid");
+      return 0;
+    }
+    const uint8_t *name = data + offset + 4u;
+    const uint8_t *chunk = name + 4u;
+    if (!png_chunk_name_valid(name)) {
+      set_error(error, error_capacity, "the PNG chunk name is invalid");
+      return 0;
+    }
+    if (png_crc32(name, (size_t)length + 4u) != be32(chunk + length)) {
+      set_error(error, error_capacity, "the PNG chunk checksum is invalid");
+      return 0;
+    }
+
+    if (!memcmp(name, "IHDR", 4u)) {
+      if (have_header || offset != 8u || length != 13u) {
+        set_error(error, error_capacity, "the PNG chunk layout is invalid");
+        return 0;
+      }
+      have_header = 1;
+    } else if (!have_header) {
+      set_error(error, error_capacity, "the PNG chunk layout is invalid");
+      return 0;
+    } else if (!memcmp(name, "PLTE", 4u)) {
+      if (have_palette || have_pixels || !length || length > 768u ||
+          length % 3u || color == 0u || color == 4u) {
+        set_error(error, error_capacity, "the PNG palette is invalid");
+        return 0;
+      }
+      palette_entries = length / 3u;
+      if (color == 3u && palette_entries > (1u << depth)) {
+        set_error(error, error_capacity, "the PNG palette is invalid");
+        return 0;
+      }
+      have_palette = 1;
+    } else if (!memcmp(name, "tRNS", 4u)) {
+      int valid = !have_transparency && !have_pixels;
+      valid = valid &&
+              ((color == 0u && length == 2u) ||
+               (color == 2u && length == 6u) ||
+               (color == 3u && have_palette && length &&
+                length <= palette_entries));
+      if (!valid) {
+        set_error(error, error_capacity,
+                  "the PNG transparency data is invalid");
+        return 0;
+      }
+      have_transparency = 1;
+    } else if (!memcmp(name, "IDAT", 4u)) {
+      if (pixels_ended || (color == 3u && !have_palette)) {
+        set_error(error, error_capacity, "the PNG chunk layout is invalid");
+        return 0;
+      }
+      have_pixels = 1;
+    } else if (!memcmp(name, "IEND", 4u)) {
+      if (length || !have_pixels || offset + 12u != size) {
+        set_error(error, error_capacity, "the PNG ending is invalid");
+        return 0;
+      }
+      return 1;
+    } else {
+      if ((name[0] & 32u) == 0) {
+        set_error(error, error_capacity, "the PNG uses an unknown core chunk");
+        return 0;
+      }
+      if (have_pixels)
+        pixels_ended = 1;
+    }
+    if (have_pixels && memcmp(name, "IDAT", 4u) != 0)
+      pixels_ended = 1;
+    offset += (size_t)length + 12u;
+  }
+  set_error(error, error_capacity, "the PNG ending is missing");
+  return 0;
+}
+
+static int png_has_transparency(const uint8_t *data, size_t size) {
+  for (size_t offset = 8u; offset + 12u <= size;) {
+    uint32_t length = be32(data + offset);
+    if ((size_t)length > size - offset - 12u)
+      return 0;
+    if (!memcmp(data + offset + 4u, "tRNS", 4u))
+      return 1;
+    if (!memcmp(data + offset + 4u, "IEND", 4u))
+      return 0;
+    offset += (size_t)length + 12u;
+  }
+  return 0;
 }
 
 static int check_bmp(const uint8_t *data, size_t size, char *error,
@@ -321,12 +457,12 @@ static int check_tiff(const uint8_t *data, size_t size, char *error,
         }
         for (uint64_t value_index = 0; value_index < values; ++value_index) {
           uint16_t sample = tiff16(value + (size_t)value_index * 2u, little);
-          if ((tag == 258 && sample > 8) ||
+          if ((tag == 258 && sample > 16) ||
               (tag == 339 && sample != 1)) {
             set_error(
                 error, error_capacity,
                 tag == 258
-                    ? "QLIC currently accepts images with up to 8 bits per channel"
+                    ? "QLIC currently accepts TIFF images with up to 16 bits per channel"
                     : "floating point and signed TIFF images are unsupported");
             return 0;
           }
@@ -347,6 +483,68 @@ static int check_tiff(const uint8_t *data, size_t size, char *error,
     return 0;
   }
   return 1;
+}
+
+static int inspect_tiff_layout(const uint8_t *data, size_t size,
+                               uint32_t *channels, uint32_t *bits,
+                               uint32_t *alpha_mode) {
+  if (size < 8u || !channels || !bits || !alpha_mode)
+    return 0;
+  int little = data[0] == 'I';
+  int big = tiff16(data + 2u, little) == 43u;
+  size_t count_bytes = big ? 8u : 2u;
+  size_t entry_bytes = big ? 20u : 12u;
+  size_t inline_bytes = big ? 8u : 4u;
+  size_t value_field = big ? 12u : 8u;
+  uint64_t offset = big ? tiff64(data + 8u, little)
+                        : tiff32(data + 4u, little);
+  if (!tiff_range(offset, count_bytes, size))
+    return 0;
+  uint64_t count = big ? tiff64(data + (size_t)offset, little)
+                       : tiff16(data + (size_t)offset, little);
+  uint64_t entries_offset = offset + count_bytes;
+  if (count > SIZE_MAX / entry_bytes ||
+      !tiff_range(entries_offset, count * entry_bytes, size))
+    return 0;
+  uint32_t samples = 1u;
+  uint32_t depth = 1u;
+  uint32_t association = 0u;
+  for (uint64_t index = 0; index < count; ++index) {
+    const uint8_t *entry =
+        data + (size_t)entries_offset + (size_t)index * entry_bytes;
+    uint16_t tag = tiff16(entry, little);
+    uint16_t type = tiff16(entry + 2u, little);
+    uint64_t values = big ? tiff64(entry + 4u, little)
+                          : tiff32(entry + 4u, little);
+    if (type != 3u || !values ||
+        (tag != 258u && tag != 277u && tag != 338u))
+      continue;
+    uint64_t bytes64 = values * 2u;
+    const uint8_t *value = entry + value_field;
+    if (bytes64 > inline_bytes) {
+      uint64_t value_offset = big ? tiff64(entry + value_field, little)
+                                  : tiff32(entry + value_field, little);
+      if (!tiff_range(value_offset, bytes64, size))
+        return 0;
+      value = data + (size_t)value_offset;
+    }
+    if (tag == 258u)
+      depth = tiff16(value, little);
+    else if (values == 1u) {
+      if (tag == 277u) {
+        samples = tiff16(value, little);
+      } else {
+        uint16_t extra = tiff16(value, little);
+        association = extra == 1u ? 2u : extra == 2u ? 1u : 0u;
+      }
+    }
+  }
+  if (!depth || depth > 16u || !samples || samples > 4u)
+    return 0;
+  *bits = depth;
+  *channels = samples == 2u ? 4u : samples;
+  *alpha_mode = (*channels == 4u) ? (association ? association : 1u) : 0u;
+  return *channels == 1u || *channels == 3u || *channels == 4u;
 }
 
 static int check_webp(const uint8_t *data, size_t size, char *error,
@@ -502,6 +700,248 @@ static int check_avif(const uint8_t *data, size_t size, char *error,
     set_error(error, error_capacity,
               "lossy AVIF color encoding is not accepted");
     return 0;
+  }
+  return 1;
+}
+
+#define QLIC_INPUT_MAX_METADATA_BYTES UINT64_C(16777216)
+
+static int input_add_metadata(QlicInput *input, const uint8_t tag[4],
+                              const uint8_t *data, size_t size, char *error,
+                              size_t error_capacity) {
+  uint64_t total = size;
+  for (uint32_t index = 0; index < input->metadata_count; ++index)
+    total += input->metadata[index].size;
+  if (input->metadata_count >= QLIC_INPUT_MAX_METADATA ||
+      total > QLIC_INPUT_MAX_METADATA_BYTES) {
+    set_error(error, error_capacity,
+              "the source metadata exceeds QLIC's safe metadata limits");
+    return 0;
+  }
+  QlicInputMetadata *metadata = input->metadata + input->metadata_count++;
+  memcpy(metadata->tag, tag, 4u);
+  metadata->data = data;
+  metadata->size = size;
+  return 1;
+}
+
+static int png_xmp_packet(const uint8_t *data, size_t size,
+                          const uint8_t **packet, size_t *packet_size) {
+  static const char keyword[] = "XML:com.adobe.xmp";
+  const uint8_t *keyword_end = (const uint8_t *)memchr(data, 0, size);
+  if (!keyword_end || (size_t)(keyword_end - data) != sizeof(keyword) - 1u ||
+      memcmp(data, keyword, sizeof(keyword) - 1u))
+    return 0;
+  size_t offset = sizeof(keyword);
+  if (offset + 2u > size || data[offset] != 0u || data[offset + 1u] != 0u)
+    return 0;
+  offset += 2u;
+  for (unsigned field = 0; field < 2u; ++field) {
+    const uint8_t *end =
+        (const uint8_t *)memchr(data + offset, 0, size - offset);
+    if (!end)
+      return 0;
+    offset = (size_t)(end - data) + 1u;
+  }
+  *packet = data + offset;
+  *packet_size = size - offset;
+  return 1;
+}
+
+static int collect_png_metadata(QlicInput *input, char *error,
+                                size_t error_capacity) {
+  const uint8_t *data = input->data;
+  size_t size = input->size;
+  for (size_t offset = 8u; offset + 12u <= size;) {
+    uint32_t length = be32(data + offset);
+    if ((size_t)length > size - offset - 12u)
+      return 0;
+    const uint8_t *tag = data + offset + 4u;
+    const uint8_t *payload = tag + 4u;
+    if (!memcmp(tag, "IEND", 4u))
+      return 1;
+    if (!memcmp(tag, "eXIf", 4u)) {
+      if (!input_add_metadata(input, (const uint8_t *)"EXIF", payload,
+                              length, error, error_capacity))
+        return 0;
+    } else if (!memcmp(tag, "caBX", 4u)) {
+      if (!input_add_metadata(input, (const uint8_t *)"JUMB", payload,
+                              length, error, error_capacity))
+        return 0;
+    } else if (!memcmp(tag, "iTXt", 4u)) {
+      const uint8_t *packet = NULL;
+      size_t packet_size = 0;
+      if (png_xmp_packet(payload, length, &packet, &packet_size)) {
+        if (!input_add_metadata(input, (const uint8_t *)"XMP_", packet,
+                                packet_size, error, error_capacity))
+          return 0;
+      } else if (!input_add_metadata(input, tag, payload, length, error,
+                                     error_capacity)) {
+        return 0;
+      }
+    } else if (!memcmp(tag, "iCCP", 4u) || !memcmp(tag, "pHYs", 4u)) {
+      if (!input_add_metadata(input, tag, payload, length, error,
+                              error_capacity))
+        return 0;
+    }
+    offset += (size_t)length + 12u;
+  }
+  return 1;
+}
+
+static int collect_webp_metadata(QlicInput *input, char *error,
+                                 size_t error_capacity) {
+  const uint8_t *data = input->data;
+  size_t size = input->size;
+  for (size_t offset = 12u; offset + 8u <= size;) {
+    uint32_t length = le32(data + offset + 4u);
+    size_t payload = offset + 8u;
+    if ((size_t)length > size - payload)
+      return 0;
+    const uint8_t *tag = data + offset;
+    const uint8_t *bytes = data + payload;
+    if (!memcmp(tag, "ICCP", 4u)) {
+      if (input->icc_size) {
+        set_error(error, error_capacity,
+                  "the WebP source contains duplicate ICC profiles");
+        return 0;
+      }
+      input->icc = bytes;
+      input->icc_size = length;
+    } else if (!memcmp(tag, "EXIF", 4u)) {
+      if (!input_add_metadata(input, (const uint8_t *)"EXIF", bytes, length,
+                              error, error_capacity))
+        return 0;
+    } else if (!memcmp(tag, "XMP ", 4u)) {
+      if (!input_add_metadata(input, (const uint8_t *)"XMP_", bytes, length,
+                              error, error_capacity))
+        return 0;
+    } else if (!memcmp(tag, "JUMB", 4u)) {
+      if (!input_add_metadata(input, (const uint8_t *)"JUMB", bytes, length,
+                              error, error_capacity))
+        return 0;
+    }
+    size_t padded = (size_t)length + ((size_t)length & 1u);
+    if (padded > size - payload)
+      return 0;
+    offset = payload + padded;
+  }
+  return 1;
+}
+
+static size_t tiff_type_size(uint16_t type) {
+  static const uint8_t sizes[] = {0, 1, 1, 2, 4, 8, 1, 1, 2, 4,
+                                  8, 4, 8, 4, 8, 8, 8, 8, 8};
+  return type < sizeof(sizes) ? sizes[type] : 0u;
+}
+
+static int collect_tiff_metadata(QlicInput *input, char *error,
+                                 size_t error_capacity) {
+  const uint8_t *data = input->data;
+  size_t size = input->size;
+  int little = data[0] == 'I';
+  int big = tiff16(data + 2u, little) == 43u;
+  uint64_t offset = big ? tiff64(data + 8u, little) : tiff32(data + 4u, little);
+  size_t count_bytes = big ? 8u : 2u;
+  size_t entry_bytes = big ? 20u : 12u;
+  size_t inline_bytes = big ? 8u : 4u;
+  unsigned directories = 0;
+  while (offset && directories++ < 1024u) {
+    if (!tiff_range(offset, count_bytes, size))
+      return 0;
+    uint64_t count = big ? tiff64(data + (size_t)offset, little)
+                         : tiff16(data + (size_t)offset, little);
+    uint64_t entries_offset = offset + count_bytes;
+    if (count > SIZE_MAX / entry_bytes ||
+        !tiff_range(entries_offset, count * entry_bytes + (big ? 8u : 4u),
+                    size))
+      return 0;
+    for (uint64_t index = 0; index < count; ++index) {
+      const uint8_t *entry =
+          data + (size_t)entries_offset + (size_t)index * entry_bytes;
+      uint16_t tag = tiff16(entry, little);
+      if (tag != 700u && tag != 33723u && tag != 34377u &&
+          tag != 34675u && tag != 52502u)
+        continue;
+      uint16_t type = tiff16(entry + 2u, little);
+      size_t unit = tiff_type_size(type);
+      uint64_t values = big ? tiff64(entry + 4u, little)
+                            : tiff32(entry + 4u, little);
+      if (!unit || values > UINT64_MAX / unit)
+        return 0;
+      uint64_t bytes64 = values * unit;
+      if (bytes64 > SIZE_MAX)
+        return 0;
+      const uint8_t *value = NULL;
+      if (bytes64 <= inline_bytes) {
+        value = entry + (big ? 12u : 8u);
+      } else {
+        uint64_t value_offset = big ? tiff64(entry + 12u, little)
+                                    : tiff32(entry + 8u, little);
+        if (!tiff_range(value_offset, bytes64, size))
+          return 0;
+        value = data + (size_t)value_offset;
+      }
+      size_t bytes = (size_t)bytes64;
+      if (tag == 34675u) {
+        if (input->icc_size) {
+          set_error(error, error_capacity,
+                    "the TIFF source contains duplicate ICC profiles");
+          return 0;
+        }
+        input->icc = value;
+        input->icc_size = bytes;
+      } else {
+        const uint8_t *name = tag == 700u     ? (const uint8_t *)"XMP_"
+                              : tag == 33723u ? (const uint8_t *)"IPTC"
+                              : tag == 52502u ? (const uint8_t *)"JUMB"
+                                             : (const uint8_t *)"8BIM";
+        if (!input_add_metadata(input, name, value, bytes, error,
+                                error_capacity))
+          return 0;
+      }
+    }
+    const uint8_t *next = data + (size_t)entries_offset + (size_t)count * entry_bytes;
+    offset = big ? tiff64(next, little) : tiff32(next, little);
+  }
+  return offset == 0u;
+}
+
+static int collect_jxl_metadata(QlicInput *input, char *error,
+                                size_t error_capacity) {
+  const uint8_t *data = input->data;
+  size_t size = input->size;
+  if (size < 12u || memcmp(data + 4u, "JXL ", 4u))
+    return 1;
+  for (size_t offset = 12u; offset + 8u <= size;) {
+    uint64_t box_size = be32(data + offset);
+    size_t header = 8u;
+    if (box_size == 1u) {
+      if (size - offset < 16u)
+        return 0;
+      box_size = be64(data + offset + 8u);
+      header = 16u;
+    } else if (!box_size) {
+      box_size = size - offset;
+    }
+    if (box_size < header || box_size > size - offset)
+      return 0;
+    const uint8_t *type = data + offset + 4u;
+    const uint8_t *payload = data + offset + header;
+    size_t payload_size = (size_t)box_size - header;
+    const uint8_t *tag = NULL;
+    if (!memcmp(type, "Exif", 4u))
+      tag = (const uint8_t *)"EXIF";
+    else if (!memcmp(type, "xml ", 4u))
+      tag = (const uint8_t *)"XMP_";
+    else if (!memcmp(type, "jumb", 4u))
+      tag = (const uint8_t *)"JUMB";
+    else if (!memcmp(type, "brob", 4u))
+      tag = (const uint8_t *)"BROB";
+    if (tag && !input_add_metadata(input, tag, payload, payload_size, error,
+                                   error_capacity))
+      return 0;
+    offset += (size_t)box_size;
   }
   return 1;
 }
@@ -729,8 +1169,19 @@ static int inspect_input(QlicInput *input, uint64_t max_pixels, char *error,
   const uint8_t *data = input->data;
   size_t size = input->size;
   int ok = 0;
+  input->channels = 4u;
+  input->bits_per_sample = 8u;
   if (is_png(data, size)) {
     ok = check_png(data, size, error, error_capacity);
+    if (ok) {
+      uint8_t color = data[25];
+      input->channels =
+          (color == 0 && !png_has_transparency(data, size))
+              ? 1u
+              : (color == 2 && !png_has_transparency(data, size)) ? 3u : 4u;
+      input->bits_per_sample = data[24];
+      ok = collect_png_metadata(input, error, error_capacity);
+    }
   } else if (size >= 6 &&
              (!memcmp(data, "GIF87a", 6) || !memcmp(data, "GIF89a", 6))) {
     ok = 1;
@@ -742,12 +1193,21 @@ static int inspect_input(QlicInput *input, uint64_t max_pixels, char *error,
               (!memcmp(data, "II+\0", 4)) ||
               (!memcmp(data, "MM\0+", 4)))) {
     ok = check_tiff(data, size, error, error_capacity);
+    if (ok)
+      ok = inspect_tiff_layout(data, size, &input->channels,
+                               &input->bits_per_sample, &input->alpha_mode);
+    if (ok)
+      ok = collect_tiff_metadata(input, error, error_capacity);
   } else if (size >= 12 && !memcmp(data, "RIFF", 4) &&
              !memcmp(data + 8, "WEBP", 4)) {
     ok = check_webp(data, size, error, error_capacity);
+    if (ok)
+      ok = collect_webp_metadata(input, error, error_capacity);
     input->decoder = QLIC_INPUT_WEBP;
   } else if (jxl_signature(data, size)) {
     ok = inspect_jxl(data, size, max_pixels, error, error_capacity);
+    if (ok)
+      ok = collect_jxl_metadata(input, error, error_capacity);
     input->decoder = QLIC_INPUT_JXL;
   } else if (looks_like_avif(data, size)) {
     ok = check_avif(data, size, error, error_capacity);
@@ -820,5 +1280,6 @@ void qlic_input_close(QlicInput *input) {
   if (!input)
     return;
   free(input->data);
+  free(input->owned_icc);
   memset(input, 0, sizeof(*input));
 }

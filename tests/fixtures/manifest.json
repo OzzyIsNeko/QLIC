@@ -1,0 +1,352 @@
+{
+  "schema": 1,
+  "format": "QLIC conformance fixtures",
+  "profiles_sha256": "8cbcabfa08cd566ef2008d557bf16edf8b0701c14843a93c27b623493d95b338",
+  "crc32": {
+    "name": "CRC-32/ISO-HDLC",
+    "reflected_polynomial": "edb88320",
+    "initial": "ffffffff",
+    "final_xor": "ffffffff",
+    "check_123456789": "cbf43926"
+  },
+  "fixtures": [
+    {
+      "file": "animation.qlic",
+      "profile": "animation-1",
+      "bytes": 158,
+      "sha256": "bfe655fcdc38c6e01f3ac57e9eaa57f8e00def1e537ed2fe57cb1c3540325d3a",
+      "width": 2,
+      "height": 2,
+      "outer_mode": 17,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "decoded_rgba_crc32": [
+        "bc5aab1c",
+        "d6538a42"
+      ]
+    },
+    {
+      "file": "blocks.qlic",
+      "profile": "legacy-0x",
+      "bytes": 46,
+      "sha256": "e6a7bdf4a591c5a484d3242dc409db8404fcd928c7fbf80466a885fbfff38345",
+      "width": 1,
+      "height": 17,
+      "outer_mode": 18,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "decoded_rgba_crc32": [
+        "5f370f87"
+      ]
+    },
+    {
+      "file": "cpalette-lzms.qlic",
+      "profile": "core-still-1",
+      "bytes": 94,
+      "sha256": "4799d8b8decc683d857e657b047e47e49c8073de21b82473ece813b773f86a56",
+      "width": 512,
+      "height": 512,
+      "outer_mode": 13,
+      "outer_transform": 2,
+      "outer_codec": 3,
+      "decoded_rgba_crc32": [
+        "e1d7051e"
+      ]
+    },
+    {
+      "file": "gray-model-lzms.qlic",
+      "profile": "legacy-0x",
+      "bytes": 142,
+      "sha256": "c0f3edf5804d6d3e4bcc86dc42a1a9676277714e56684840af3f2c27a7724078",
+      "width": 384,
+      "height": 256,
+      "outer_mode": 16,
+      "outer_transform": 0,
+      "outer_codec": 3,
+      "decoded_rgba_crc32": [
+        "3bf96fd4"
+      ]
+    },
+    {
+      "file": "gray-rle.qlic",
+      "profile": "core-still-1",
+      "bytes": 34,
+      "sha256": "bd9783f8fbd675e7f06f82d3375f382b997aaa5351d3f2cedca3ffbc6d6b1c71",
+      "width": 3,
+      "height": 31,
+      "outer_mode": 1,
+      "outer_transform": 4,
+      "outer_codec": 0,
+      "decoded_rgba_crc32": [
+        "d59a4f1e"
+      ]
+    },
+    {
+      "file": "native.qlic",
+      "profile": "core-still-1",
+      "bytes": 73,
+      "sha256": "30576c0a27378c24a91e386507daba99b426ecd4d6e01f9bfd61ff01c72e7196",
+      "width": 64,
+      "height": 64,
+      "outer_mode": 9,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "decoded_rgba_crc32": [
+        "b385d194"
+      ],
+      "native_mode": 40,
+      "native_transform": 0,
+      "native_tile_log": 1,
+      "native_control": 0,
+      "native_pixel_crc32": "248a6029"
+    },
+    {
+      "file": "normal-map-quadratic.qlic",
+      "profile": "core-still-1",
+      "bytes": 8235,
+      "sha256": "2f8b28ef5ee63c5a45e546b46794691ed7bbd3442370276de1eae6d13da5951c",
+      "width": 128,
+      "height": 256,
+      "outer_mode": 9,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "decoded_rgba_crc32": [
+        "9122c65a"
+      ],
+      "native_mode": 52,
+      "native_transform": 38,
+      "native_tile_log": 4,
+      "native_control": 4,
+      "native_pixel_crc32": "5c36171a"
+    },
+    {
+      "file": "normal-map-sphere-green8.qlic",
+      "profile": "core-still-1",
+      "bytes": 8179,
+      "sha256": "bf586c8ea1c729599708e086fc11b633f809737195844851acd06835a9e269d4",
+      "width": 128,
+      "height": 256,
+      "outer_mode": 9,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "decoded_rgba_crc32": [
+        "9dd0c466"
+      ],
+      "native_mode": 52,
+      "native_transform": 40,
+      "native_tile_log": 4,
+      "native_control": 4,
+      "native_pixel_crc32": "5c36171a"
+    },
+    {
+      "file": "palette-filtered.qlic",
+      "profile": "legacy-0x",
+      "bytes": 85,
+      "sha256": "85352c49d280c8dfdcc17984911daff4b8273af7de2ac6e170c099b6011eb890",
+      "width": 9,
+      "height": 257,
+      "outer_mode": 11,
+      "outer_transform": 2,
+      "outer_codec": 0,
+      "decoded_rgba_crc32": [
+        "2b1e5d73"
+      ]
+    },
+    {
+      "file": "palette.qlic",
+      "profile": "core-still-1",
+      "bytes": 43,
+      "sha256": "7bbc067434fffec71db44a1b468dd413fdf9f96476bf7a89a20d3985287e5980",
+      "width": 17,
+      "height": 1,
+      "outer_mode": 5,
+      "outer_transform": 2,
+      "outer_codec": 0,
+      "decoded_rgba_crc32": [
+        "5f370f87"
+      ]
+    },
+    {
+      "file": "planar-med-lzms.qlic",
+      "profile": "core-still-1",
+      "bytes": 78,
+      "sha256": "15eb0ad082ec4a59d2045851b4a444b8768919502a5d649743d93f17bd5564cd",
+      "width": 3,
+      "height": 2,
+      "outer_mode": 3,
+      "outer_transform": 11,
+      "outer_codec": 3,
+      "decoded_rgba_crc32": [
+        "d04203d4"
+      ]
+    },
+    {
+      "file": "rgb-lzms.qlic",
+      "profile": "core-still-1",
+      "bytes": 152,
+      "sha256": "e2f63a0782832757ec7466af287003dfe8717bc985d751659ad820cee461581a",
+      "width": 257,
+      "height": 9,
+      "outer_mode": 3,
+      "outer_transform": 3,
+      "outer_codec": 3,
+      "decoded_rgba_crc32": [
+        "10528ad2"
+      ]
+    },
+    {
+      "file": "separable.qlic",
+      "profile": "core-still-1",
+      "bytes": 33,
+      "sha256": "1b55a669d446919f18f4c7cdbb055a85c36ebb6683f17151a08ecd0e7bb1d4eb",
+      "width": 1,
+      "height": 1,
+      "outer_mode": 7,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "decoded_rgba_crc32": [
+        "0c463091"
+      ]
+    },
+    {
+      "file": "tile-model.qlic",
+      "profile": "legacy-0x",
+      "bytes": 92,
+      "sha256": "572ac32c1b107fca52007840741f55f8be071d7d5cee3a88b635a6e80d755dea",
+      "width": 31,
+      "height": 3,
+      "outer_mode": 15,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "decoded_rgba_crc32": [
+        "db03a251"
+      ]
+    },
+    {
+      "file": "tile-palette-lzms.qlic",
+      "profile": "core-still-1",
+      "bytes": 2746,
+      "sha256": "84969e66f9b6dd665ff1d423e88eed4a1452c4d2f94edcd043b515f4ed899790",
+      "width": 542,
+      "height": 699,
+      "outer_mode": 13,
+      "outer_transform": 12,
+      "outer_codec": 3,
+      "decoded_rgba_crc32": [
+        "55533a44"
+      ]
+    },
+    {
+      "file": "wide-u16-10-boundary.qlic",
+      "profile": "wide-integer-1",
+      "bytes": 141,
+      "sha256": "4196e5e397c0dfc5c0364ca68ad0e0243576835479af78136b366183eaf02a59",
+      "width": 3,
+      "height": 2,
+      "outer_mode": 19,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "sample_crc32": "00398066",
+      "bits_per_sample": 10,
+      "channels": 1
+    },
+    {
+      "file": "wide-u16-16-rgba.qlic",
+      "profile": "wide-integer-1",
+      "bytes": 172,
+      "sha256": "b90491a1c7895c76face85505ee8e4e86dfd366b9034d9cf230eb65b33434202",
+      "width": 2,
+      "height": 2,
+      "outer_mode": 19,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "sample_crc32": "39612e76",
+      "bits_per_sample": 16,
+      "channels": 4
+    },
+    {
+      "file": "wide-u32-17-boundary.qlic",
+      "profile": "wide-integer-1",
+      "bytes": 186,
+      "sha256": "a609ccdd4da93833832160a1f843f9f1e897a6932f044b1be3b1b560726f4ad3",
+      "width": 3,
+      "height": 2,
+      "outer_mode": 19,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "sample_crc32": "534edc57",
+      "bits_per_sample": 17,
+      "channels": 1
+    },
+    {
+      "file": "wide-u32-24-rgb.qlic",
+      "profile": "wide-integer-1",
+      "bytes": 220,
+      "sha256": "d7e359104d12c22a6fae29b63a953f5030cc7d37efcccfded2699802eccce1b6",
+      "width": 2,
+      "height": 2,
+      "outer_mode": 19,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "sample_crc32": "419556a2",
+      "bits_per_sample": 24,
+      "channels": 3
+    },
+    {
+      "file": "hdr-u16-10-pq-rgb.qlic",
+      "profile": "hdr-1",
+      "bytes": 287,
+      "sha256": "820ef17d04b20856ae371984401d5f45265117fddbb88b48f4416ae96e75f132",
+      "width": 2,
+      "height": 2,
+      "outer_mode": 20,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "sample_crc32": "254c7447",
+      "bits_per_sample": 10,
+      "channels": 3
+    },
+    {
+      "file": "hdr-u16-10-hlg-rgb.qlic",
+      "profile": "hdr-1",
+      "bytes": 227,
+      "sha256": "dc792022c9aa42939bcefa9aaf797a558cf3354961bfaa8274ba0bb24bea7179",
+      "width": 2,
+      "height": 2,
+      "outer_mode": 20,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "sample_crc32": "254c7447",
+      "bits_per_sample": 10,
+      "channels": 3
+    },
+    {
+      "file": "hdr-u16-12-pq-rgba.qlic",
+      "profile": "hdr-1",
+      "bytes": 333,
+      "sha256": "f74dea58811863fa6147ca15dd0bed0e3dc89900405b13bd56a4d9750de8289d",
+      "width": 2,
+      "height": 2,
+      "outer_mode": 20,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "sample_crc32": "2c382e2d",
+      "bits_per_sample": 12,
+      "channels": 4
+    },
+    {
+      "file": "described-u16-8-srgb-rgb.qlic",
+      "profile": "hdr-1",
+      "bytes": 178,
+      "sha256": "a344fbc4fc445857ef7475ad4a67f6627a0f32d80a09d2cfc74f5114fa984e94",
+      "width": 2,
+      "height": 2,
+      "outer_mode": 20,
+      "outer_transform": 0,
+      "outer_codec": 0,
+      "sample_crc32": "71c6b856",
+      "bits_per_sample": 8,
+      "channels": 3
+    }
+  ]
+}

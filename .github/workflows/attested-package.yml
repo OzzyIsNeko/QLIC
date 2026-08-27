@@ -1,0 +1,38 @@
+name: Attested package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Build and validate packages
+        shell: pwsh
+        run: .\scripts\package.ps1 -Config Release -BuildDir build\ci-attested -CommunityRelease
+
+      - name: Generate signed GitHub/Sigstore build provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26
+        with:
+          subject-path: dist/archives/*.zip
+
+      - name: Upload packages, checksums, SBOMs, and local provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: qlic-attested
+          path: |
+            dist/archives/*.zip
+            dist/SHA256SUMS.txt
+            dist/SBOMSUMS.txt
+            dist/sbom/*.spdx.json
+            dist/PROVENANCE.intoto.json
+          if-no-files-found: error

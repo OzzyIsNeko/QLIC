@@ -1,0 +1,6 @@
+QLIC 1.0.0 unsigned community release
+
+This package passed the automated release and package checks, but its Windows
+binaries and PowerShell scripts have no Authenticode publisher identity.
+Windows may show an Unknown publisher or SmartScreen warning. Verify the
+published SHA-256 checksum before running it.

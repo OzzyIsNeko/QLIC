@@ -33,6 +33,11 @@ function Source-Category([object]$Source, [IO.FileInfo]$File) {
   return $Source.Name
 }
 
+function Portable-SourcePath([IO.FileInfo]$File) {
+  return [IO.Path]::GetRelativePath($sourcesRoot, $File.FullName).
+    Replace("\", "/")
+}
+
 $magickExe = Resolve-Tool $Magick
 $corpus = if ($Output) {
   [IO.Path]::GetFullPath($Output)
@@ -205,14 +210,13 @@ for ($index = 0; $index -lt $ordered.Count; $index++) {
       Pixels = $pixels
       ColorModel = if ($colorType -eq 2) { "RGB" } else { "RGBA" }
       NormalizedSHA256 = $hash
-      Source = $file.FullName
     })
     $totalPixels += $pixels
   } catch {
     Remove-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
     $excluded.Add([pscustomobject][ordered]@{
       Category = $category
-      Source = $file.FullName
+      Source = Portable-SourcePath $file
       Reason = $_.Exception.Message
     })
   }

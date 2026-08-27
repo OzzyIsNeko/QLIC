@@ -28,7 +28,7 @@ static void qlic_parallel_drain(QlicParallelRun *run) {
 
 static void CALLBACK qlic_parallel_callback(PTP_CALLBACK_INSTANCE instance,
                                             void *context, PTP_WORK work) {
-  /* this keeps Windows from treating a long codec task as pool starvation */
+  /* Prevent pool-starvation handling for long codec tasks. */
   (void)CallbackMayRunLong(instance);
   (void)work;
   qlic_parallel_drain((QlicParallelRun *)context);

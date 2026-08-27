@@ -21,6 +21,12 @@ int memcmp(const void *a, const void *b, size_t n);
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#ifdef QLIC_STREAM_TRACE
+#include <math.h>
+#endif
+#if defined(QLIC_STREAM_TRACE) && !defined(_WIN32)
+#include <time.h>
+#endif
 #endif
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -156,6 +162,40 @@ static uint32_t crc_step(uint32_t c, const uint8_t *p, size_t n) {
 uint32_t stream_crc32(const uint8_t *p, size_t n) {
     return crc_step(0xFFFFFFFFu, p, n) ^ 0xFFFFFFFFu;
 }
+uint32_t stream_crc32_wide(const void *pixels, uint32_t width, uint32_t height,
+                           size_t stride, uint32_t channels,
+                           uint32_t bits_per_sample) {
+    const uint8_t *base = (const uint8_t *)pixels;
+    size_t storage = bits_per_sample <= 16u ? sizeof(uint16_t)
+                                             : sizeof(uint32_t);
+    size_t sample_bytes = (bits_per_sample + 7u) / 8u;
+    uint32_t crc = UINT32_C(0xffffffff);
+    crc_ensure();
+    size_t pixel_bytes = (size_t)channels * storage;
+    for (uint32_t y = 0; y < height; ++y) {
+        const uint8_t *row = base + (size_t)y * stride;
+        for (uint32_t x = 0; x < width; ++x) {
+            const uint8_t *sample = row + (size_t)x * pixel_bytes;
+            for (uint32_t channel = 0; channel < channels; ++channel) {
+                uint32_t value;
+                if (storage == sizeof(uint16_t)) {
+                    uint16_t native;
+                    memcpy(&native, sample + (size_t)channel * storage,
+                           sizeof(native));
+                    value = native;
+                } else {
+                    memcpy(&value, sample + (size_t)channel * storage,
+                           sizeof(value));
+                }
+                for (size_t byte = 0; byte < sample_bytes; ++byte) {
+                    uint8_t part = (uint8_t)(value >> (byte * 8u));
+                    crc = crc_tab[0][(crc ^ part) & 0xffu] ^ (crc >> 8);
+                }
+            }
+        }
+    }
+    return crc ^ UINT32_C(0xffffffff);
+}
 static uint64_t pack_rgbx_pair(uint64_t value) {
     return (value & UINT64_C(0x0000000000ffffff)) |
            ((value >> 8) & UINT64_C(0x0000ffffff000000));
@@ -260,7 +300,7 @@ typedef struct {
 } Enc;
 
 static void enc_init(Enc *e, int adapt) {
-    /* this scale is part of QST1 and has to match in the decoder */
+    /* QST1 scale; must match the decoder. */
     e->buf = NULL; e->len = e->cap = 0; e->oom = 0;
     e->max = SIZE_MAX; e->cut = 0;
     e->adapt = adapt == ADAPT_FAST || adapt == ADAPT_SLOW ? adapt : ADAPT_DEFAULT;
@@ -312,8 +352,10 @@ static QLIC_FORCEINLINE void enc_shift(Enc *e) {
     e->low = (e->low << 8) & 0xFFFFFFFFull;
 }
 static QLIC_FORCEINLINE void prob_update(Prob *p, int bit, int adapt) {
-    if (bit) *p -= *p >> adapt;
-    else *p += (PROB_ONE - *p) >> adapt;
+    if (bit)
+        *p -= *p >> adapt;
+    else
+        *p += (PROB_ONE - *p) >> adapt;
 }
 static QLIC_FORCEINLINE void enc_bit_rate(Enc *QLIC_RESTRICT e,
                                           Prob *QLIC_RESTRICT p, int bit,
@@ -342,7 +384,30 @@ static QLIC_FORCEINLINE void enc_bit(Enc *QLIC_RESTRICT e,
 }
 static void enc_flush(Enc *e) { for (int i = 0; i < 5; i++) enc_shift(e); }
 
-typedef struct { const uint8_t *ptr, *end; uint32_t range, code; int truncated; int adapt; } Dec;
+#ifdef QLIC_STREAM_TRACE
+enum {
+    DEC_TRACE_OTHER,
+    DEC_TRACE_MAP,
+    DEC_TRACE_ZERO,
+    DEC_TRACE_MAGNITUDE,
+    DEC_TRACE_TAIL,
+    DEC_TRACE_SIGN,
+    DEC_TRACE_COUNT
+};
+#endif
+
+typedef struct {
+    const uint8_t *ptr, *end;
+    uint32_t range, code;
+    int truncated;
+    int adapt;
+#ifdef QLIC_STREAM_TRACE
+    unsigned trace_class;
+    Prob trace_probability;
+    uint64_t trace_decisions[DEC_TRACE_COUNT];
+    uint64_t trace_renormalizations[DEC_TRACE_COUNT];
+#endif
+} Dec;
 static QLIC_FORCEINLINE uint8_t dec_getbyte(Dec *d) {
     if (d->ptr >= d->end) { d->truncated = 1; return 0; }
     return *d->ptr++;
@@ -350,10 +415,20 @@ static QLIC_FORCEINLINE uint8_t dec_getbyte(Dec *d) {
 static void dec_init(Dec *d, const uint8_t *b, size_t n, int adapt) {
     d->ptr = b; d->end = b + n; d->range = 0xFFFFFFFFu; d->code = 0; d->truncated = 0;
     d->adapt = adapt == ADAPT_FAST || adapt == ADAPT_SLOW ? adapt : ADAPT_DEFAULT;
+#ifdef QLIC_STREAM_TRACE
+    d->trace_class = DEC_TRACE_OTHER;
+    d->trace_probability = PROB_INIT;
+    memset(d->trace_decisions, 0, sizeof(d->trace_decisions));
+    memset(d->trace_renormalizations, 0, sizeof(d->trace_renormalizations));
+#endif
     for (int i = 0; i < 5; i++) d->code = (d->code << 8) | dec_getbyte(d);
 }
 static QLIC_FORCEINLINE int dec_bit_rate(Dec *QLIC_RESTRICT d,
                                          Prob *QLIC_RESTRICT p, int adapt) {
+#ifdef QLIC_STREAM_TRACE
+    d->trace_decisions[d->trace_class]++;
+    d->trace_probability = *p;
+#endif
     uint32_t prob = *p;
     uint32_t bound = (d->range >> PROB_BITS) * prob;
     uint32_t bit = d->code >= bound;
@@ -365,9 +440,15 @@ static QLIC_FORCEINLINE int dec_bit_rate(Dec *QLIC_RESTRICT d,
     d->range = (bound & ~mask) | (low_range & mask);
     *p = (Prob)((up & ~mask) | (down & mask));
     if (d->range < RC_TOP) {
+#ifdef QLIC_STREAM_TRACE
+        d->trace_renormalizations[d->trace_class]++;
+#endif
         d->range <<= 8;
         d->code = (d->code << 8) | dec_getbyte(d);
         if (d->range < RC_TOP) {
+#ifdef QLIC_STREAM_TRACE
+            d->trace_renormalizations[d->trace_class]++;
+#endif
             d->range <<= 8;
             d->code = (d->code << 8) | dec_getbyte(d);
         }
@@ -387,11 +468,12 @@ static QLIC_FORCEINLINE void enc_bit_mix(Enc *e, Prob *child, Prob *parent,
     prob_update(parent, bit, e->adapt);
 }
 
-static QLIC_FORCEINLINE int dec_bit_mix(Dec *d, Prob *child, Prob *parent) {
+static QLIC_FORCEINLINE int dec_bit_mix(Dec *d, Prob *child, Prob *parent,
+                                        int adapt) {
     Prob mixed = (Prob)((5u * *child + 3u * *parent + 4u) >> 3);
-    int bit = dec_bit(d, &mixed);
-    prob_update(child, bit, d->adapt);
-    prob_update(parent, bit, d->adapt);
+    int bit = dec_bit_rate(d, &mixed, adapt);
+    prob_update(child, bit, adapt);
+    prob_update(parent, bit, adapt);
     return bit;
 }
 
@@ -403,11 +485,12 @@ static QLIC_FORCEINLINE void enc_bit_coarse(Enc *e, Prob *child, Prob *parent,
     prob_update(parent, bit, e->adapt);
 }
 
-static QLIC_FORCEINLINE int dec_bit_coarse(Dec *d, Prob *child, Prob *parent) {
+static QLIC_FORCEINLINE int dec_bit_coarse(Dec *d, Prob *child, Prob *parent,
+                                           int adapt) {
     Prob mixed = (Prob)((*child + *parent + 1u) >> 1);
-    int bit = dec_bit(d, &mixed);
-    prob_update(child, bit, d->adapt);
-    prob_update(parent, bit, d->adapt);
+    int bit = dec_bit_rate(d, &mixed, adapt);
+    prob_update(child, bit, adapt);
+    prob_update(parent, bit, adapt);
     return bit;
 }
 
@@ -422,13 +505,13 @@ static QLIC_FORCEINLINE void enc_bit_mix3(Enc *e, Prob *child, Prob *parent,
 }
 
 static QLIC_FORCEINLINE int dec_bit_mix3(Dec *d, Prob *child, Prob *parent,
-                                         Prob *coarse) {
+                                         Prob *coarse, int adapt) {
     Prob parent_mix = (Prob)((*parent + *coarse + 1u) >> 1);
     Prob mixed = (Prob)((5u * *child + 3u * parent_mix + 4u) >> 3);
-    int bit = dec_bit(d, &mixed);
-    prob_update(child, bit, d->adapt);
-    prob_update(parent, bit, d->adapt);
-    prob_update(coarse, bit, d->adapt);
+    int bit = dec_bit_rate(d, &mixed, adapt);
+    prob_update(child, bit, adapt);
+    prob_update(parent, bit, adapt);
+    prob_update(coarse, bit, adapt);
     return bit;
 }
 
@@ -443,13 +526,13 @@ static QLIC_FORCEINLINE void enc_bit_root(Enc *e, Prob *fine, Prob *coarse,
 }
 
 static QLIC_FORCEINLINE int dec_bit_root(Dec *d, Prob *fine, Prob *coarse,
-                                         Prob *root, int slow) {
+                                         Prob *root, int slow, int adapt) {
     Prob coarse_mix = (Prob)((*coarse + *root + 1u) >> 1);
     Prob mixed = (Prob)((*fine + coarse_mix + 1u) >> 1);
-    int bit = dec_bit(d, &mixed);
-    prob_update(fine, bit, d->adapt);
-    prob_update(coarse, bit, d->adapt + slow);
-    prob_update(root, bit, d->adapt + slow);
+    int bit = dec_bit_rate(d, &mixed, adapt);
+    prob_update(fine, bit, adapt);
+    prob_update(coarse, bit, adapt + slow);
+    prob_update(root, bit, adapt + slow);
     return bit;
 }
 
@@ -469,16 +552,16 @@ static QLIC_FORCEINLINE void enc_bit_mix4_custom(
 
 static QLIC_FORCEINLINE int dec_bit_mix4_custom(
     Dec *d, Prob *child, Prob *fine, Prob *coarse, Prob *root, int slow,
-    int weight, int child_rate) {
+    int weight, int child_rate, int adapt) {
     Prob coarse_mix = (Prob)((*coarse + *root + 1u) >> 1);
     Prob parent_mix = (Prob)((*fine + coarse_mix + 1u) >> 1);
     Prob mixed = (Prob)(((unsigned)weight * *child +
                          (unsigned)(8 - weight) * parent_mix + 4u) >> 3);
-    int bit = dec_bit(d, &mixed);
-    prob_update(child, bit, d->adapt - child_rate);
-    prob_update(fine, bit, d->adapt);
-    prob_update(coarse, bit, d->adapt + slow);
-    prob_update(root, bit, d->adapt + slow);
+    int bit = dec_bit_rate(d, &mixed, adapt);
+    prob_update(child, bit, adapt - child_rate);
+    prob_update(fine, bit, adapt);
+    prob_update(coarse, bit, adapt + slow);
+    prob_update(root, bit, adapt + slow);
     return bit;
 }
 
@@ -491,9 +574,9 @@ static QLIC_FORCEINLINE void enc_bit_mix4(
 
 static QLIC_FORCEINLINE int dec_bit_mix4(Dec *d, Prob *child, Prob *fine,
                                          Prob *coarse, Prob *root, int slow,
-                                         int fast_child) {
+                                         int fast_child, int adapt) {
     return dec_bit_mix4_custom(d, child, fine, coarse, root, slow,
-                               fast_child ? 6 : 5, fast_child);
+                               fast_child ? 6 : 5, fast_child, adapt);
 }
 
 static QLIC_FORCEINLINE void enc_bit_mix4_weight(
@@ -512,16 +595,16 @@ static QLIC_FORCEINLINE void enc_bit_mix4_weight(
 
 static QLIC_FORCEINLINE int dec_bit_mix4_weight(
     Dec *d, Prob *child, Prob *fine, Prob *coarse, Prob *root, int slow,
-    int weight) {
+    int weight, int adapt) {
     Prob coarse_mix = (Prob)((*coarse + *root + 1u) >> 1);
     Prob parent_mix = (Prob)((*fine + coarse_mix + 1u) >> 1);
     Prob mixed = (Prob)(((unsigned)weight * *child +
                          (unsigned)(8 - weight) * parent_mix + 4u) >> 3);
-    int bit = dec_bit(d, &mixed);
-    prob_update(child, bit, d->adapt + 1);
-    prob_update(fine, bit, d->adapt);
-    prob_update(coarse, bit, d->adapt + slow);
-    prob_update(root, bit, d->adapt + slow);
+    int bit = dec_bit_rate(d, &mixed, adapt);
+    prob_update(child, bit, adapt + 1);
+    prob_update(fine, bit, adapt);
+    prob_update(coarse, bit, adapt + slow);
+    prob_update(root, bit, adapt + slow);
     return bit;
 }
 
@@ -540,15 +623,15 @@ static QLIC_FORCEINLINE void enc_bit_mix5_sign(
 
 static QLIC_FORCEINLINE int dec_bit_mix5_sign(
     Dec *d, Prob *child, Prob *exact, Prob *fine, Prob *coarse, Prob *root,
-    int slow, int weight, int child_rate, int exact_rate) {
+    int slow, int weight, int child_rate, int exact_rate, int adapt) {
     Prob mixed = (Prob)(((unsigned)weight * *child +
                          (unsigned)(16 - weight) * *exact + 8u) >> 4);
-    int bit = dec_bit(d, &mixed);
-    prob_update(child, bit, d->adapt - child_rate);
-    prob_update(exact, bit, d->adapt - exact_rate);
-    prob_update(fine, bit, d->adapt);
-    prob_update(coarse, bit, d->adapt + slow);
-    prob_update(root, bit, d->adapt + slow);
+    int bit = dec_bit_rate(d, &mixed, adapt);
+    prob_update(child, bit, adapt - child_rate);
+    prob_update(exact, bit, adapt - exact_rate);
+    prob_update(fine, bit, adapt);
+    prob_update(coarse, bit, adapt + slow);
+    prob_update(root, bit, adapt + slow);
     return bit;
 }
 
@@ -562,9 +645,26 @@ static QLIC_FORCEINLINE int dec_bit_mix5_sign(
 #define NPRED 8
 #define NPREDX0 16
 #define NPREDX 32
+/* Native planes are at most 9 bits: k is 2..9 and mantissa bits are 0..7. */
+#define MANT37_SIDE (MAXK - 2)
 #define MAP37_REUSE_PENALTY 6
 #define WEIGHTED_PROXY_BPS 100
 #define WEIGHTED_MIN_GAIN_BPS 75
+#define QLIC_TRANSFORM_COUNT 41
+
+/* Weighted mode 54 saves about one percent on its retained final streams but
+   costs roughly thirty percent in decode time.  Keep the format and forced
+   benchmark path for compatibility and future optimization, while requiring
+   an explicit trace-build opt-in before the ordinary encoder can select it. */
+static int weighted_mode54_encoder_enabled(void) {
+#if defined(QLIC_STREAM_TRACE) && !defined(QLIC_WASM)
+    const char *value = getenv("QLIC_ENABLE_WEIGHTED_MODE54");
+    return value && value[0] && value[0] != '0';
+#else
+    return 0;
+#endif
+}
+
 static const uint8_t sign53_weight[3] = {4, 8, 12};
 static const uint8_t sign53_child_rate[3] = {1, 2, 3};
 static const uint8_t sign53_exact_rate[3] = {0, 2, 2};
@@ -588,7 +688,7 @@ typedef struct {
 
 typedef struct {
     Prob unary[XCTX][MAXK + 1];
-    Prob mant[XCTX][MAXK + 1][MAXK];
+    Prob mant[XCTX][MANT37_SIDE][MANT37_SIDE];
     Prob nz[XCTX];
     Prob sg[XCTX][2];
     Prob predtreex[NPREDX];
@@ -603,7 +703,7 @@ typedef struct {
 
 typedef struct {
     Prob unary[NCTX][MAXK + 1];
-    Prob mant[NCTX][MAXK + 1][MAXK];
+    Prob mant[NCTX][MANT37_SIDE][MANT37_SIDE];
 } Coarse37Full;
 
 typedef struct {
@@ -615,7 +715,7 @@ typedef struct {
 
 typedef struct {
     Prob unary[NACT][MAXK + 1];
-    Prob mant[NACT][MAXK + 1][MAXK];
+    Prob mant[NACT][MANT37_SIDE][MANT37_SIDE];
 } Root37Full;
 
 typedef struct {
@@ -631,6 +731,1225 @@ typedef struct {
     Root37Full root_full;
     Predictor37 predictor;
 } Decode37Models;
+
+#ifdef QLIC_STREAM_TRACE
+enum {
+    CONTEXT_CACHE_ZERO,
+    CONTEXT_CACHE_MAGNITUDE,
+    CONTEXT_CACHE_SIGN,
+    CONTEXT_CACHE_DECISIONS
+};
+
+typedef struct {
+    Prob zero;
+    Prob magnitude[2];
+    Prob sign[3];
+} ContextPacket;
+
+typedef struct {
+    double bits[CONTEXT_CACHE_DECISIONS];
+    uint64_t decisions[CONTEXT_CACHE_DECISIONS];
+} ContextCost;
+
+typedef struct {
+    uint32_t signature;
+    uint16_t tag;
+    uint8_t state;
+    uint8_t reserved;
+    ContextPacket packet;
+} ContextCacheEntry;
+
+typedef struct {
+    ContextCacheEntry *entries;
+    size_t entry_count;
+    ContextPacket fallback[NACT];
+    ContextCost cost;
+    uint64_t hits;
+    uint64_t fallbacks;
+    uint64_t first_hits;
+    uint64_t second_hits;
+    uint64_t conflicts;
+    uint64_t tag_collisions;
+} ContextCache;
+
+typedef struct {
+    uint32_t signature;
+    uint8_t used;
+    uint8_t reserved[3];
+    ContextPacket packet;
+} ContextDictionaryEntry;
+
+typedef struct {
+    ContextDictionaryEntry *entries;
+    size_t entry_count;
+    ContextCost cost;
+    uint64_t hits;
+    uint64_t inserts;
+} ContextDictionary;
+
+typedef struct {
+    ContextPacket *packet;
+    ContextCacheEntry *promote;
+} ContextProvider;
+
+typedef struct {
+    ContextCost baseline;
+    ContextDictionary dictionary;
+    ContextCache cache512;
+    ContextCache cache1024;
+    uint64_t residuals;
+    int plane_role;
+} ContextCacheTrace;
+
+static double context_cache_bit_cost[PROB_ONE][2];
+static int context_cache_cost_ready;
+
+static void context_packet_init(ContextPacket *packet) {
+    for (size_t i = 0; i < sizeof(*packet) / sizeof(Prob); ++i)
+        ((Prob *)packet)[i] = PROB_INIT;
+}
+
+static void context_cache_cost_init(void) {
+    if (context_cache_cost_ready) return;
+    const double inverse_log_two = 1.0 / log(2.0);
+    for (unsigned probability = 1; probability < PROB_ONE; ++probability) {
+        context_cache_bit_cost[probability][0] =
+            -log((double)probability / (double)PROB_ONE) * inverse_log_two;
+        context_cache_bit_cost[probability][1] =
+            -log((double)(PROB_ONE - probability) / (double)PROB_ONE) *
+            inverse_log_two;
+    }
+    context_cache_bit_cost[0][0] = context_cache_bit_cost[1][0];
+    context_cache_bit_cost[0][1] = context_cache_bit_cost[1][1];
+    context_cache_cost_ready = 1;
+}
+
+static QLIC_FORCEINLINE void context_cost_add(ContextCost *cost, int kind,
+                                               Prob probability, int bit) {
+    unsigned index = probability < PROB_ONE ? probability : PROB_ONE - 1u;
+    cost->bits[kind] += context_cache_bit_cost[index][bit != 0];
+    cost->decisions[kind]++;
+}
+
+static uint32_t context_cache_hash(uint32_t value) {
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    value *= 0x846ca68bu;
+    return value ^ (value >> 16);
+}
+
+static int context_cache_init(ContextCache *cache, size_t entry_count) {
+    memset(cache, 0, sizeof(*cache));
+    cache->entries = calloc(entry_count, sizeof(*cache->entries));
+    if (!cache->entries) return 0;
+    cache->entry_count = entry_count;
+    for (int activity = 0; activity < NACT; ++activity)
+        context_packet_init(&cache->fallback[activity]);
+    return 1;
+}
+
+static void context_cache_free(ContextCache *cache) {
+    free(cache->entries);
+    memset(cache, 0, sizeof(*cache));
+}
+
+static int context_dictionary_init(ContextDictionary *dictionary,
+                                   size_t pixels) {
+    memset(dictionary, 0, sizeof(*dictionary));
+    if (pixels > SIZE_MAX / 2u) return 0;
+    size_t target = pixels * 2u;
+    size_t entries = 1024u;
+    while (entries < target) {
+        if (entries >= ((size_t)1u << 23)) return 0;
+        entries <<= 1;
+    }
+    dictionary->entries = calloc(entries, sizeof(*dictionary->entries));
+    if (!dictionary->entries) return 0;
+    dictionary->entry_count = entries;
+    return 1;
+}
+
+static void context_dictionary_free(ContextDictionary *dictionary) {
+    free(dictionary->entries);
+    memset(dictionary, 0, sizeof(*dictionary));
+}
+
+static ContextPacket *context_dictionary_get(ContextDictionary *dictionary,
+                                             uint32_t signature) {
+    size_t mask = dictionary->entry_count - 1u;
+    size_t index = context_cache_hash(signature) & mask;
+    for (;;) {
+        ContextDictionaryEntry *entry = &dictionary->entries[index];
+        if (!entry->used) {
+            entry->used = 1;
+            entry->signature = signature;
+            context_packet_init(&entry->packet);
+            dictionary->inserts++;
+            return &entry->packet;
+        }
+        if (entry->signature == signature) {
+            dictionary->hits++;
+            return &entry->packet;
+        }
+        index = (index + 1u) & mask;
+    }
+}
+
+static ContextProvider context_cache_get(ContextCache *cache,
+                                         uint32_t signature, int activity) {
+    uint32_t hash = context_cache_hash(signature);
+    uint16_t tag = (uint16_t)(hash >> 16);
+    ContextCacheEntry *entry =
+        &cache->entries[hash & (cache->entry_count - 1u)];
+    ContextProvider provider = {&cache->fallback[activity], NULL};
+    if (entry->state && entry->tag == tag) {
+        if (entry->signature != signature) cache->tag_collisions++;
+        if (entry->state == 2u) {
+            cache->hits++;
+            provider.packet = &entry->packet;
+        } else {
+            cache->fallbacks++;
+            cache->second_hits++;
+            provider.promote = entry;
+        }
+        return provider;
+    }
+    if (entry->state) cache->conflicts++;
+    cache->fallbacks++;
+    cache->first_hits++;
+    entry->signature = signature;
+    entry->tag = tag;
+    entry->state = 1u;
+    return provider;
+}
+
+static void context_cache_promote(ContextProvider provider) {
+    if (!provider.promote) return;
+    provider.promote->packet = *provider.packet;
+    provider.promote->state = 2u;
+}
+
+static QLIC_FORCEINLINE Prob *context_packet_probability(
+    ContextPacket *packet, int kind, int index) {
+    if (kind == CONTEXT_CACHE_ZERO) return &packet->zero;
+    if (kind == CONTEXT_CACHE_MAGNITUDE)
+        return &packet->magnitude[index];
+    return &packet->sign[index];
+}
+
+static QLIC_FORCEINLINE void context_packet_bit(ContextPacket *packet,
+                                                ContextCost *cost, int kind,
+                                                int index, int bit,
+                                                int adaptation) {
+    Prob *probability = context_packet_probability(packet, kind, index);
+    context_cost_add(cost, kind, *probability, bit);
+    prob_update(probability, bit, adaptation);
+}
+
+static ContextCacheTrace *context_cache_trace_create(size_t pixels,
+                                                     int plane_role) {
+    ContextCacheTrace *trace = calloc(1, sizeof(*trace));
+    if (!trace) return NULL;
+    context_cache_cost_init();
+    trace->plane_role = plane_role;
+    if (!context_dictionary_init(&trace->dictionary, pixels) ||
+        !context_cache_init(&trace->cache512, 512u) ||
+        !context_cache_init(&trace->cache1024, 1024u)) {
+        context_dictionary_free(&trace->dictionary);
+        context_cache_free(&trace->cache512);
+        context_cache_free(&trace->cache1024);
+        free(trace);
+        return NULL;
+    }
+    return trace;
+}
+
+static int context_residual_class(int magnitude_bits, int sign) {
+    if (!magnitude_bits) return 0;
+    int value = magnitude_bits > 4 ? 4 : magnitude_bits;
+    return sign < 0 ? value + 4 : value;
+}
+
+static uint32_t context_cache_signature(int predictor, int activity,
+                                        int west_bits, int west_sign,
+                                        int north_bits, int north_sign,
+                                        int cross_state, int plane_role) {
+    unsigned west = (unsigned)context_residual_class(west_bits, west_sign);
+    unsigned north = (unsigned)context_residual_class(north_bits, north_sign);
+    return (uint32_t)predictor | ((uint32_t)activity << 5) |
+           ((uint32_t)west << 9) | ((uint32_t)north << 13) |
+           ((uint32_t)(cross_state & 255) << 17) |
+           ((uint32_t)(plane_role & 3) << 25);
+}
+
+static void context_cache_trace_bit(ContextCacheTrace *trace,
+                                    ContextPacket *dictionary_packet,
+                                    ContextProvider provider512,
+                                    ContextProvider provider1024, int kind,
+                                    int index, int bit,
+                                    Prob baseline_probability,
+                                    int adaptation) {
+    context_cost_add(&trace->baseline, kind, baseline_probability, bit);
+    context_packet_bit(dictionary_packet, &trace->dictionary.cost, kind,
+                       index, bit, adaptation);
+    context_packet_bit(provider512.packet, &trace->cache512.cost, kind,
+                       index, bit, adaptation);
+    context_packet_bit(provider1024.packet, &trace->cache1024.cost, kind,
+                       index, bit, adaptation);
+}
+
+static void context_cache_trace_residual(
+    ContextCacheTrace *trace, uint32_t signature, int activity, int adaptation,
+    int magnitude_bits, int coded_sign, Prob zero_probability,
+    const Prob magnitude_probability[2], Prob sign_probability) {
+    ContextPacket *dictionary_packet =
+        context_dictionary_get(&trace->dictionary, signature);
+    ContextProvider provider512 =
+        context_cache_get(&trace->cache512, signature, activity);
+    ContextProvider provider1024 =
+        context_cache_get(&trace->cache1024, signature, activity);
+    context_cache_trace_bit(trace, dictionary_packet, provider512, provider1024,
+                            CONTEXT_CACHE_ZERO, 0, magnitude_bits != 0,
+                            zero_probability, adaptation);
+    if (magnitude_bits) {
+        context_cache_trace_bit(trace, dictionary_packet, provider512,
+                                provider1024, CONTEXT_CACHE_MAGNITUDE, 0,
+                                magnitude_bits > 1,
+                                magnitude_probability[0], adaptation);
+        if (magnitude_bits > 1)
+            context_cache_trace_bit(trace, dictionary_packet, provider512,
+                                    provider1024, CONTEXT_CACHE_MAGNITUDE, 1,
+                                    magnitude_bits > 2,
+                                    magnitude_probability[1], adaptation);
+        int sign_class = magnitude_bits <= 1 ? 0 : magnitude_bits <= 3 ? 1 : 2;
+        context_cache_trace_bit(trace, dictionary_packet, provider512,
+                                provider1024, CONTEXT_CACHE_SIGN, sign_class,
+                                coded_sign, sign_probability, adaptation);
+    }
+    context_cache_promote(provider512);
+    context_cache_promote(provider1024);
+    trace->residuals++;
+}
+
+static double context_cost_total(const ContextCost *cost) {
+    double total = 0.0;
+    for (int kind = 0; kind < CONTEXT_CACHE_DECISIONS; ++kind)
+        total += cost->bits[kind];
+    return total;
+}
+
+static double context_stream_delta(double candidate, double baseline,
+                                   size_t range_bytes) {
+    if (!range_bytes) return 0.0;
+    return 100.0 * (candidate - baseline) / ((double)range_bytes * 8.0);
+}
+
+static void context_cache_trace_print(ContextCacheTrace *trace,
+                                      size_t range_bytes) {
+    double baseline = context_cost_total(&trace->baseline);
+    double dictionary = context_cost_total(&trace->dictionary.cost);
+    double cache512 = context_cost_total(&trace->cache512.cost);
+    double cache1024 = context_cost_total(&trace->cache1024.cost);
+    fprintf(stderr,
+            "context-cache plane=%d pixels=%llu range-bytes=%zu "
+            "packet-bytes=%zu entry-bytes=%zu baseline-bits=%.6f "
+            "dictionary-bits=%.6f dictionary-stream-percent=%.9f "
+            "cache512-bits=%.6f cache512-stream-percent=%.9f "
+            "cache1024-bits=%.6f cache1024-stream-percent=%.9f\n",
+            trace->plane_role, (unsigned long long)trace->residuals, range_bytes,
+            sizeof(ContextPacket), sizeof(ContextCacheEntry), baseline,
+            dictionary, context_stream_delta(dictionary, baseline, range_bytes),
+            cache512, context_stream_delta(cache512, baseline, range_bytes),
+            cache1024, context_stream_delta(cache1024, baseline, range_bytes));
+    fprintf(stderr,
+            "context-cache-decisions plane=%d zero=%llu magnitude=%llu "
+            "sign=%llu baseline-zero=%.6f dictionary-zero=%.6f "
+            "cache512-zero=%.6f cache1024-zero=%.6f "
+            "baseline-magnitude=%.6f dictionary-magnitude=%.6f "
+            "cache512-magnitude=%.6f cache1024-magnitude=%.6f "
+            "baseline-sign=%.6f dictionary-sign=%.6f cache512-sign=%.6f "
+            "cache1024-sign=%.6f\n",
+            trace->plane_role,
+            (unsigned long long)trace->baseline.decisions[CONTEXT_CACHE_ZERO],
+            (unsigned long long)trace->baseline.decisions[CONTEXT_CACHE_MAGNITUDE],
+            (unsigned long long)trace->baseline.decisions[CONTEXT_CACHE_SIGN],
+            trace->baseline.bits[CONTEXT_CACHE_ZERO],
+            trace->dictionary.cost.bits[CONTEXT_CACHE_ZERO],
+            trace->cache512.cost.bits[CONTEXT_CACHE_ZERO],
+            trace->cache1024.cost.bits[CONTEXT_CACHE_ZERO],
+            trace->baseline.bits[CONTEXT_CACHE_MAGNITUDE],
+            trace->dictionary.cost.bits[CONTEXT_CACHE_MAGNITUDE],
+            trace->cache512.cost.bits[CONTEXT_CACHE_MAGNITUDE],
+            trace->cache1024.cost.bits[CONTEXT_CACHE_MAGNITUDE],
+            trace->baseline.bits[CONTEXT_CACHE_SIGN],
+            trace->dictionary.cost.bits[CONTEXT_CACHE_SIGN],
+            trace->cache512.cost.bits[CONTEXT_CACHE_SIGN],
+            trace->cache1024.cost.bits[CONTEXT_CACHE_SIGN]);
+    fprintf(stderr,
+            "context-cache-state plane=%d dictionary-inserts=%llu "
+            "dictionary-hits=%llu cache512-hits=%llu cache512-fallbacks=%llu "
+            "cache512-first=%llu cache512-second=%llu cache512-conflicts=%llu "
+            "cache512-tag-collisions=%llu cache1024-hits=%llu "
+            "cache1024-fallbacks=%llu cache1024-first=%llu "
+            "cache1024-second=%llu cache1024-conflicts=%llu "
+            "cache1024-tag-collisions=%llu\n",
+            trace->plane_role,
+            (unsigned long long)trace->dictionary.inserts,
+            (unsigned long long)trace->dictionary.hits,
+            (unsigned long long)trace->cache512.hits,
+            (unsigned long long)trace->cache512.fallbacks,
+            (unsigned long long)trace->cache512.first_hits,
+            (unsigned long long)trace->cache512.second_hits,
+            (unsigned long long)trace->cache512.conflicts,
+            (unsigned long long)trace->cache512.tag_collisions,
+            (unsigned long long)trace->cache1024.hits,
+            (unsigned long long)trace->cache1024.fallbacks,
+            (unsigned long long)trace->cache1024.first_hits,
+            (unsigned long long)trace->cache1024.second_hits,
+            (unsigned long long)trace->cache1024.conflicts,
+            (unsigned long long)trace->cache1024.tag_collisions);
+}
+
+static void context_cache_trace_free(ContextCacheTrace *trace) {
+    if (!trace) return;
+    context_dictionary_free(&trace->dictionary);
+    context_cache_free(&trace->cache512);
+    context_cache_free(&trace->cache1024);
+    free(trace);
+}
+
+enum {
+    GRADIENT_TOPOLOGY_ZERO,
+    GRADIENT_TOPOLOGY_MAGNITUDE,
+    GRADIENT_TOPOLOGY_DECISIONS
+};
+
+enum {
+    GRADIENT_TOPOLOGY_SIGNATURES = 16,
+    GRADIENT_TOPOLOGY_VARIANTS = 4,
+    GRADIENT_TOPOLOGY_SHARED_VARIANTS = GRADIENT_TOPOLOGY_VARIANTS - 1,
+    GRADIENT_TOPOLOGY_WEIGHTS = 6
+};
+
+static const unsigned gradient_topology_classes[GRADIENT_TOPOLOGY_VARIANTS] = {
+    1, 4, 8, 16
+};
+
+static const unsigned gradient_topology_weights[GRADIENT_TOPOLOGY_WEIGHTS] = {
+    1, 2, 3, 4, 5, 6
+};
+
+typedef struct {
+    uint64_t *counts[GRADIENT_TOPOLOGY_DECISIONS];
+    size_t contexts[GRADIENT_TOPOLOGY_DECISIONS];
+    double kt_bits[GRADIENT_TOPOLOGY_DECISIONS]
+                  [GRADIENT_TOPOLOGY_VARIANTS];
+    double live_bits[GRADIENT_TOPOLOGY_DECISIONS];
+    Prob *shared[GRADIENT_TOPOLOGY_DECISIONS]
+                [GRADIENT_TOPOLOGY_SHARED_VARIANTS];
+    double shared_bits[GRADIENT_TOPOLOGY_DECISIONS]
+                      [GRADIENT_TOPOLOGY_SHARED_VARIANTS]
+                      [GRADIENT_TOPOLOGY_WEIGHTS];
+    uint64_t decisions[GRADIENT_TOPOLOGY_DECISIONS];
+    uint64_t signatures[GRADIENT_TOPOLOGY_SIGNATURES];
+    int plane_role;
+} GradientTopologyTrace;
+
+static int gradient_topology_sign_change(int first, int second) {
+    return first && second && ((first < 0) != (second < 0));
+}
+
+static int gradient_topology_abs(int value) {
+    return value < 0 ? -value : value;
+}
+
+/* The signature is invariant to global sample inversion.  Activity already
+   carries gradient magnitude, so these bits retain only geometry that the
+   absolute-value activity sum discards.  The low bits deliberately form
+   nested 4-, 8-, and 16-class candidates. */
+static unsigned gradient_topology_signature(
+    int west, int north, int northwest, int northeast, int west2,
+    int north2) {
+    int horizontal_left = north - northwest;
+    int horizontal_right = northeast - north;
+    int horizontal_current = west - west2;
+    int vertical_left = west - northwest;
+    int vertical_current = north - north2;
+    unsigned signature = 0;
+    signature |= (unsigned)gradient_topology_sign_change(
+        horizontal_left, horizontal_right);
+    signature |= (unsigned)gradient_topology_sign_change(
+                     horizontal_left, vertical_left)
+                 << 1;
+    int horizontal_energy = gradient_topology_abs(horizontal_left) +
+                            gradient_topology_abs(horizontal_right) +
+                            gradient_topology_abs(horizontal_current);
+    int vertical_energy = gradient_topology_abs(vertical_left) +
+                          gradient_topology_abs(vertical_current);
+    signature |= (unsigned)(horizontal_energy > vertical_energy) << 2;
+    int second_order_turn =
+        gradient_topology_sign_change(horizontal_left, horizontal_current) ||
+        gradient_topology_sign_change(vertical_left, vertical_current);
+    signature |= (unsigned)second_order_turn << 3;
+    return signature;
+}
+
+static void gradient_topology_trace_free(GradientTopologyTrace *trace) {
+    if (!trace) return;
+    for (int decision = 0; decision < GRADIENT_TOPOLOGY_DECISIONS;
+         ++decision)
+        for (int variant = 0;
+             variant < GRADIENT_TOPOLOGY_SHARED_VARIANTS; ++variant)
+            free(trace->shared[decision][variant]);
+    free(trace->counts[0]);
+    free(trace->counts[1]);
+    free(trace);
+}
+
+static GradientTopologyTrace *gradient_topology_trace_create(
+    size_t zero_contexts, size_t magnitude_contexts, int plane_role) {
+    size_t contexts[GRADIENT_TOPOLOGY_DECISIONS] = {
+        zero_contexts, magnitude_contexts
+    };
+    GradientTopologyTrace *trace = calloc(1, sizeof(*trace));
+    if (!trace) return NULL;
+    trace->plane_role = plane_role;
+    for (int decision = 0; decision < GRADIENT_TOPOLOGY_DECISIONS;
+         ++decision) {
+        size_t count = contexts[decision];
+        if (!count ||
+            count > SIZE_MAX /
+                        (GRADIENT_TOPOLOGY_SIGNATURES * 2u *
+                         sizeof(*trace->counts[decision]))) {
+            gradient_topology_trace_free(trace);
+            return NULL;
+        }
+        trace->counts[decision] = calloc(
+            count * GRADIENT_TOPOLOGY_SIGNATURES * 2u,
+            sizeof(*trace->counts[decision]));
+        if (!trace->counts[decision]) {
+            gradient_topology_trace_free(trace);
+            return NULL;
+        }
+        trace->contexts[decision] = count;
+        for (int variant = 0;
+             variant < GRADIENT_TOPOLOGY_SHARED_VARIANTS; ++variant) {
+            unsigned classes = gradient_topology_classes[variant + 1];
+            trace->shared[decision][variant] = calloc(
+                (size_t)NACT * 4u * classes,
+                sizeof(*trace->shared[decision][variant]));
+            if (!trace->shared[decision][variant]) {
+                gradient_topology_trace_free(trace);
+                return NULL;
+            }
+        }
+    }
+    context_cache_cost_init();
+    return trace;
+}
+
+static QLIC_FORCEINLINE size_t gradient_topology_count_index(
+    size_t context, unsigned signature, int bit) {
+    return ((context * GRADIENT_TOPOLOGY_SIGNATURES + signature) * 2u) +
+           (unsigned)(bit != 0);
+}
+
+static void gradient_topology_trace_bit(
+    GradientTopologyTrace *trace, int decision, size_t context,
+    unsigned signature, int activity, int predictor_family, int adaptation,
+    Prob live_probability, int bit) {
+    uint64_t *counts = trace->counts[decision];
+    unsigned probability = live_probability < PROB_ONE
+                               ? live_probability
+                               : PROB_ONE - 1u;
+    if (!probability) probability = 1u;
+    trace->live_bits[decision] +=
+        context_cache_bit_cost[probability][bit != 0];
+    trace->decisions[decision]++;
+    for (int variant = 0; variant < GRADIENT_TOPOLOGY_VARIANTS; ++variant) {
+        unsigned classes = gradient_topology_classes[variant];
+        unsigned selected = signature & (classes - 1u);
+        uint64_t matching[2] = {0, 0};
+        for (unsigned candidate = selected;
+             candidate < GRADIENT_TOPOLOGY_SIGNATURES;
+             candidate += classes) {
+            size_t base = gradient_topology_count_index(
+                context, candidate, 0);
+            matching[0] += counts[base];
+            matching[1] += counts[base + 1u];
+        }
+        uint64_t denominator = 2u * (matching[0] + matching[1] + 1u);
+        uint64_t numerator = 2u * matching[bit != 0] + 1u;
+        trace->kt_bits[decision][variant] +=
+            log2((double)denominator / (double)numerator);
+    }
+    for (int variant = 0;
+         variant < GRADIENT_TOPOLOGY_SHARED_VARIANTS; ++variant) {
+        unsigned classes = gradient_topology_classes[variant + 1];
+        unsigned selected = signature & (classes - 1u);
+        size_t state =
+            ((size_t)activity * 4u + (unsigned)predictor_family) * classes +
+            selected;
+        Prob *shared = &trace->shared[decision][variant][state];
+        if (!*shared) *shared = (Prob)probability;
+        for (int weight_index = 0;
+             weight_index < GRADIENT_TOPOLOGY_WEIGHTS; ++weight_index) {
+            unsigned weight = gradient_topology_weights[weight_index];
+            unsigned mixed =
+                (weight * *shared + (8u - weight) * probability + 4u) >> 3;
+            if (!mixed) mixed = 1u;
+            else if (mixed >= PROB_ONE) mixed = PROB_ONE - 1u;
+            trace->shared_bits[decision][variant][weight_index] +=
+                context_cache_bit_cost[mixed][bit != 0];
+        }
+        prob_update(shared, bit, adaptation + 2);
+    }
+    counts[gradient_topology_count_index(
+        context, signature, bit)]++;
+}
+
+static void gradient_topology_trace_residual(
+    GradientTopologyTrace *trace, size_t zero_context,
+    size_t magnitude_context, unsigned signature, int magnitude_bits,
+    int activity, int predictor_family, int adaptation,
+    Prob zero_probability, Prob magnitude_probability) {
+    int nonzero = magnitude_bits != 0;
+    trace->signatures[signature]++;
+    gradient_topology_trace_bit(
+        trace, GRADIENT_TOPOLOGY_ZERO, zero_context, signature,
+        activity, predictor_family, adaptation, zero_probability, nonzero);
+    if (nonzero)
+        gradient_topology_trace_bit(
+            trace, GRADIENT_TOPOLOGY_MAGNITUDE, magnitude_context, signature,
+            activity, predictor_family, adaptation, magnitude_probability,
+            magnitude_bits > 1);
+}
+
+static double gradient_topology_binary_entropy(uint64_t zero,
+                                               uint64_t one) {
+    uint64_t total = zero + one;
+    if (!zero || !one) return 0.0;
+    return (double)total * log2((double)total) -
+           (double)zero * log2((double)zero) -
+           (double)one * log2((double)one);
+}
+
+static double gradient_topology_ideal_bits(
+    const GradientTopologyTrace *trace, int decision, unsigned classes) {
+    const uint64_t *counts = trace->counts[decision];
+    double bits = 0.0;
+    for (size_t context = 0; context < trace->contexts[decision]; ++context) {
+        for (unsigned selected = 0; selected < classes; ++selected) {
+            uint64_t outcomes[2] = {0, 0};
+            for (unsigned signature = selected;
+                 signature < GRADIENT_TOPOLOGY_SIGNATURES;
+                 signature += classes) {
+                size_t base = gradient_topology_count_index(
+                    context, signature, 0);
+                outcomes[0] += counts[base];
+                outcomes[1] += counts[base + 1u];
+            }
+            bits += gradient_topology_binary_entropy(
+                outcomes[0], outcomes[1]);
+        }
+    }
+    return bits;
+}
+
+static void gradient_topology_trace_print(
+    const GradientTopologyTrace *trace, size_t range_bytes) {
+    fprintf(stderr,
+            "gradient-topology plane=%d pixels=%llu range-bytes=%zu "
+            "zero-contexts=%zu magnitude-contexts=%zu zero-decisions=%llu "
+            "magnitude-decisions=%llu live-zero-bits=%.6f "
+            "live-magnitude-bits=%.6f\n",
+            trace->plane_role,
+            (unsigned long long)trace->decisions[GRADIENT_TOPOLOGY_ZERO],
+            range_bytes, trace->contexts[GRADIENT_TOPOLOGY_ZERO],
+            trace->contexts[GRADIENT_TOPOLOGY_MAGNITUDE],
+            (unsigned long long)trace->decisions[GRADIENT_TOPOLOGY_ZERO],
+            (unsigned long long)trace->decisions[GRADIENT_TOPOLOGY_MAGNITUDE],
+            trace->live_bits[GRADIENT_TOPOLOGY_ZERO],
+            trace->live_bits[GRADIENT_TOPOLOGY_MAGNITUDE]);
+    for (int variant = 0; variant < GRADIENT_TOPOLOGY_VARIANTS; ++variant) {
+        unsigned classes = gradient_topology_classes[variant];
+        double zero_ideal = gradient_topology_ideal_bits(
+            trace, GRADIENT_TOPOLOGY_ZERO, classes);
+        double magnitude_ideal = gradient_topology_ideal_bits(
+            trace, GRADIENT_TOPOLOGY_MAGNITUDE, classes);
+        fprintf(stderr,
+                "gradient-topology-model plane=%d classes=%u "
+                "zero-ideal-bits=%.6f zero-kt-bits=%.6f "
+                "magnitude-ideal-bits=%.6f magnitude-kt-bits=%.6f "
+                "total-ideal-bits=%.6f total-kt-bits=%.6f\n",
+                trace->plane_role, classes, zero_ideal,
+                trace->kt_bits[GRADIENT_TOPOLOGY_ZERO][variant],
+                magnitude_ideal,
+                trace->kt_bits[GRADIENT_TOPOLOGY_MAGNITUDE][variant],
+                zero_ideal + magnitude_ideal,
+                trace->kt_bits[GRADIENT_TOPOLOGY_ZERO][variant] +
+                    trace->kt_bits[GRADIENT_TOPOLOGY_MAGNITUDE][variant]);
+    }
+    for (int variant = 0;
+         variant < GRADIENT_TOPOLOGY_SHARED_VARIANTS; ++variant) {
+        unsigned classes = gradient_topology_classes[variant + 1];
+        for (int weight_index = 0;
+             weight_index < GRADIENT_TOPOLOGY_WEIGHTS; ++weight_index) {
+            unsigned weight = gradient_topology_weights[weight_index];
+            double zero = trace->shared_bits[GRADIENT_TOPOLOGY_ZERO]
+                                            [variant][weight_index];
+            double magnitude =
+                trace->shared_bits[GRADIENT_TOPOLOGY_MAGNITUDE]
+                                  [variant][weight_index];
+            fprintf(stderr,
+                    "gradient-topology-shared plane=%d classes=%u "
+                    "weight=%u zero-bits=%.6f magnitude-bits=%.6f "
+                    "total-bits=%.6f\n",
+                    trace->plane_role, classes, weight, zero, magnitude,
+                    zero + magnitude);
+        }
+    }
+    fprintf(stderr, "gradient-topology-signatures plane=%d counts=",
+            trace->plane_role);
+    for (unsigned signature = 0;
+         signature < GRADIENT_TOPOLOGY_SIGNATURES; ++signature)
+        fprintf(stderr, "%s%llu", signature ? "," : "",
+                (unsigned long long)trace->signatures[signature]);
+    fputc('\n', stderr);
+}
+
+enum {
+    CALIBRATION_ZERO,
+    CALIBRATION_MAGNITUDE_HEAD,
+    CALIBRATION_MAGNITUDE_SECOND,
+    CALIBRATION_SIGN_SMALL,
+    CALIBRATION_SIGN_MEDIUM,
+    CALIBRATION_SIGN_LARGE,
+    CALIBRATION_DECISIONS
+};
+
+enum {
+    CALIBRATION_ACTIVITY,
+    CALIBRATION_PREDICTOR,
+    CALIBRATION_HISTORY,
+    CALIBRATION_CROSS_CHANNEL,
+    CALIBRATION_FACTORS
+};
+
+enum { CALIBRATION_BLOCK_ROWS = 16 };
+
+enum {
+    CALIBRATION_HISTORY_CROSS,
+    CALIBRATION_ALL_FACTORS,
+    CALIBRATION_COMBINATIONS
+};
+
+static const double CALIBRATION_MIN_CURVATURE = 16.0;
+static const double CALIBRATION_CORRECTION_LIMIT = 0.5;
+static const int calibration_factor_states[CALIBRATION_FACTORS] = {
+    NACT, NPREDX, 81, 256
+};
+static const char *const calibration_factor_names[CALIBRATION_FACTORS] = {
+    "activity", "predictor", "history", "cross-channel"
+};
+static const char *const calibration_decision_names[CALIBRATION_DECISIONS] = {
+    "zero", "magnitude-head", "magnitude-second", "sign-small",
+    "sign-medium", "sign-large"
+};
+static const char *const
+    calibration_combination_names[CALIBRATION_COMBINATIONS] = {
+        "history+cross", "all-factors"
+    };
+
+typedef struct {
+    double train_gradient;
+    double train_curvature;
+    double block_gradient;
+    double block_curvature;
+    double correction;
+    double forward_saving_bits;
+    uint64_t block_decisions;
+    uint64_t decisions;
+    uint64_t scored_decisions;
+    uint8_t ready;
+} CalibrationCell;
+
+typedef struct {
+    CalibrationCell *factor[CALIBRATION_FACTORS];
+    uint64_t residuals;
+    uint64_t baseline_decisions;
+    double baseline_bits;
+    double combination_saving_bits[CALIBRATION_COMBINATIONS]
+                                  [CALIBRATION_DECISIONS];
+    uint64_t combination_decisions[CALIBRATION_COMBINATIONS]
+                                  [CALIBRATION_DECISIONS];
+    uint64_t combination_scored[CALIBRATION_COMBINATIONS]
+                               [CALIBRATION_DECISIONS];
+    uint32_t block;
+    int have_block;
+    int plane_role;
+} CalibrationTrace;
+
+static void calibration_trace_free(CalibrationTrace *trace) {
+    if (!trace) return;
+    for (int factor = 0; factor < CALIBRATION_FACTORS; ++factor)
+        free(trace->factor[factor]);
+    free(trace);
+}
+
+static CalibrationTrace *calibration_trace_create(int plane_role) {
+    CalibrationTrace *trace = calloc(1, sizeof(*trace));
+    if (!trace) return NULL;
+    trace->plane_role = plane_role;
+    context_cache_cost_init();
+    for (int factor = 0; factor < CALIBRATION_FACTORS; ++factor) {
+        size_t cells = (size_t)calibration_factor_states[factor] *
+                       CALIBRATION_DECISIONS;
+        trace->factor[factor] = calloc(cells, sizeof(CalibrationCell));
+        if (!trace->factor[factor]) {
+            calibration_trace_free(trace);
+            return NULL;
+        }
+    }
+    return trace;
+}
+
+static void calibration_trace_finish_block(CalibrationTrace *trace) {
+    static const double inverse_log_two = 1.4426950408889634074;
+    for (int factor = 0; factor < CALIBRATION_FACTORS; ++factor) {
+        size_t cells = (size_t)calibration_factor_states[factor] *
+                       CALIBRATION_DECISIONS;
+        for (size_t index = 0; index < cells; ++index) {
+            CalibrationCell *cell = &trace->factor[factor][index];
+            if (!cell->block_decisions) continue;
+            if (cell->ready) {
+                double gain =
+                    cell->correction * cell->block_gradient -
+                    0.5 * cell->correction * cell->correction *
+                        cell->block_curvature;
+                cell->forward_saving_bits += gain * inverse_log_two;
+                cell->scored_decisions += cell->block_decisions;
+            }
+            cell->train_gradient += cell->block_gradient;
+            cell->train_curvature += cell->block_curvature;
+            cell->decisions += cell->block_decisions;
+            cell->block_gradient = 0.0;
+            cell->block_curvature = 0.0;
+            cell->block_decisions = 0;
+            if (cell->train_curvature >= CALIBRATION_MIN_CURVATURE) {
+                double correction =
+                    cell->train_gradient / cell->train_curvature;
+                if (correction > CALIBRATION_CORRECTION_LIMIT)
+                    correction = CALIBRATION_CORRECTION_LIMIT;
+                else if (correction < -CALIBRATION_CORRECTION_LIMIT)
+                    correction = -CALIBRATION_CORRECTION_LIMIT;
+                cell->correction = correction;
+                cell->ready = 1;
+            }
+        }
+    }
+}
+
+static void calibration_trace_set_block(CalibrationTrace *trace,
+                                        uint32_t block) {
+    if (!trace->have_block) {
+        trace->block = block;
+        trace->have_block = 1;
+        return;
+    }
+    if (block == trace->block) return;
+    calibration_trace_finish_block(trace);
+    trace->block = block;
+}
+
+static QLIC_FORCEINLINE void calibration_trace_bit(
+    CalibrationTrace *trace, const int states[CALIBRATION_FACTORS],
+    int decision, Prob probability, int bit) {
+    unsigned probability_index =
+        probability < PROB_ONE ? probability : PROB_ONE - 1u;
+    if (!probability_index) probability_index = 1u;
+    double p0 = (double)probability_index / (double)PROB_ONE;
+    double gradient = (bit ? 0.0 : 1.0) - p0;
+    double curvature = p0 * (1.0 - p0);
+    trace->baseline_bits +=
+        context_cache_bit_cost[probability_index][bit != 0];
+    trace->baseline_decisions++;
+    for (int factor = 0; factor < CALIBRATION_FACTORS; ++factor) {
+        size_t index = (size_t)states[factor] * CALIBRATION_DECISIONS +
+                       (size_t)decision;
+        CalibrationCell *cell = &trace->factor[factor][index];
+        cell->block_gradient += gradient;
+        cell->block_curvature += curvature;
+        cell->block_decisions++;
+    }
+    CalibrationCell *activity =
+        &trace->factor[CALIBRATION_ACTIVITY][
+            (size_t)states[CALIBRATION_ACTIVITY] * CALIBRATION_DECISIONS +
+            (size_t)decision];
+    CalibrationCell *predictor =
+        &trace->factor[CALIBRATION_PREDICTOR][
+            (size_t)states[CALIBRATION_PREDICTOR] * CALIBRATION_DECISIONS +
+            (size_t)decision];
+    CalibrationCell *history =
+        &trace->factor[CALIBRATION_HISTORY][
+            (size_t)states[CALIBRATION_HISTORY] * CALIBRATION_DECISIONS +
+            (size_t)decision];
+    CalibrationCell *cross =
+        &trace->factor[CALIBRATION_CROSS_CHANNEL][
+            (size_t)states[CALIBRATION_CROSS_CHANNEL] *
+                CALIBRATION_DECISIONS +
+            (size_t)decision];
+    double correction[CALIBRATION_COMBINATIONS] = {
+        (history->ready ? history->correction : 0.0) +
+            (cross->ready ? cross->correction : 0.0),
+        (activity->ready ? activity->correction : 0.0) +
+            (predictor->ready ? predictor->correction : 0.0) +
+            (history->ready ? history->correction : 0.0) +
+            (cross->ready ? cross->correction : 0.0)
+    };
+    int ready[CALIBRATION_COMBINATIONS] = {
+        history->ready || cross->ready,
+        activity->ready || predictor->ready || history->ready || cross->ready
+    };
+    static const double inverse_log_two = 1.4426950408889634074;
+    for (int combination = 0; combination < CALIBRATION_COMBINATIONS;
+         ++combination) {
+        trace->combination_decisions[combination][decision]++;
+        if (!ready[combination]) continue;
+        double value = correction[combination];
+        if (value > CALIBRATION_CORRECTION_LIMIT)
+            value = CALIBRATION_CORRECTION_LIMIT;
+        else if (value < -CALIBRATION_CORRECTION_LIMIT)
+            value = -CALIBRATION_CORRECTION_LIMIT;
+        double gain = value * gradient -
+                      0.5 * value * value * curvature;
+        trace->combination_saving_bits[combination][decision] +=
+            gain * inverse_log_two;
+        trace->combination_scored[combination][decision]++;
+    }
+}
+
+static void calibration_trace_residual(
+    CalibrationTrace *trace, uint32_t row, int predictor, int activity,
+    int west_bits, int west_sign, int north_bits, int north_sign,
+    int cross_state, int magnitude_bits, int coded_sign,
+    Prob zero_probability, const Prob magnitude_probability[2],
+    Prob sign_probability) {
+    calibration_trace_set_block(trace, row / CALIBRATION_BLOCK_ROWS);
+    int west = context_residual_class(west_bits, west_sign);
+    int north = context_residual_class(north_bits, north_sign);
+    int states[CALIBRATION_FACTORS] = {
+        activity,
+        predictor,
+        west * 9 + north,
+        cross_state & 255
+    };
+    calibration_trace_bit(trace, states, CALIBRATION_ZERO, zero_probability,
+                          magnitude_bits != 0);
+    if (magnitude_bits) {
+        calibration_trace_bit(trace, states, CALIBRATION_MAGNITUDE_HEAD,
+                              magnitude_probability[0], magnitude_bits > 1);
+        if (magnitude_bits > 1)
+            calibration_trace_bit(trace, states,
+                                  CALIBRATION_MAGNITUDE_SECOND,
+                                  magnitude_probability[1],
+                                  magnitude_bits > 2);
+        int decision = magnitude_bits <= 1
+                           ? CALIBRATION_SIGN_SMALL
+                           : magnitude_bits <= 3
+                                 ? CALIBRATION_SIGN_MEDIUM
+                                 : CALIBRATION_SIGN_LARGE;
+        calibration_trace_bit(trace, states, decision, sign_probability,
+                              coded_sign);
+    }
+    trace->residuals++;
+}
+
+static void calibration_trace_print(CalibrationTrace *trace,
+                                    size_t range_bytes) {
+    if (trace->have_block) calibration_trace_finish_block(trace);
+    fprintf(stderr,
+            "calibration plane=%d pixels=%llu range-bytes=%zu block-rows=%d "
+            "minimum-curvature=%.1f correction-limit=%.1f "
+            "baseline-decisions=%llu baseline-bits=%.6f\n",
+            trace->plane_role, (unsigned long long)trace->residuals,
+            range_bytes, CALIBRATION_BLOCK_ROWS, CALIBRATION_MIN_CURVATURE,
+            CALIBRATION_CORRECTION_LIMIT,
+            (unsigned long long)trace->baseline_decisions,
+            trace->baseline_bits);
+    for (int factor = 0; factor < CALIBRATION_FACTORS; ++factor) {
+        uint64_t decisions = 0;
+        uint64_t scored = 0;
+        double saving = 0.0;
+        for (int state = 0; state < calibration_factor_states[factor]; ++state) {
+            for (int decision = 0; decision < CALIBRATION_DECISIONS;
+                 ++decision) {
+                CalibrationCell *cell =
+                    &trace->factor[factor][
+                        (size_t)state * CALIBRATION_DECISIONS +
+                        (size_t)decision];
+                decisions += cell->decisions;
+                scored += cell->scored_decisions;
+                saving += cell->forward_saving_bits;
+            }
+        }
+        double percent = range_bytes
+                             ? 100.0 * saving /
+                                   ((double)range_bytes * 8.0)
+                             : 0.0;
+        fprintf(stderr,
+                "calibration-factor plane=%d factor=%s states=%d "
+                "decisions=%llu scored=%llu forward-saving-bits=%.6f "
+                "forward-saving-percent=%.9f\n",
+                trace->plane_role, calibration_factor_names[factor],
+                calibration_factor_states[factor],
+                (unsigned long long)decisions,
+                (unsigned long long)scored, saving, percent);
+        for (int decision = 0; decision < CALIBRATION_DECISIONS;
+             ++decision) {
+            uint64_t decision_count = 0;
+            uint64_t decision_scored = 0;
+            double decision_saving = 0.0;
+            for (int state = 0; state < calibration_factor_states[factor];
+                 ++state) {
+                CalibrationCell *cell =
+                    &trace->factor[factor][
+                        (size_t)state * CALIBRATION_DECISIONS +
+                        (size_t)decision];
+                decision_count += cell->decisions;
+                decision_scored += cell->scored_decisions;
+                decision_saving += cell->forward_saving_bits;
+            }
+            double decision_percent =
+                range_bytes
+                    ? 100.0 * decision_saving /
+                          ((double)range_bytes * 8.0)
+                    : 0.0;
+            fprintf(stderr,
+                    "calibration-decision plane=%d factor=%s decision=%s "
+                    "decisions=%llu scored=%llu forward-saving-bits=%.6f "
+                    "forward-saving-percent=%.9f\n",
+                    trace->plane_role, calibration_factor_names[factor],
+                    calibration_decision_names[decision],
+                    (unsigned long long)decision_count,
+                    (unsigned long long)decision_scored, decision_saving,
+                    decision_percent);
+        }
+    }
+    for (int combination = 0; combination < CALIBRATION_COMBINATIONS;
+         ++combination) {
+        uint64_t decisions = 0;
+        uint64_t scored = 0;
+        double saving = 0.0;
+        for (int decision = 0; decision < CALIBRATION_DECISIONS;
+             ++decision) {
+            decisions += trace->combination_decisions[combination][decision];
+            scored += trace->combination_scored[combination][decision];
+            saving += trace->combination_saving_bits[combination][decision];
+        }
+        double percent = range_bytes
+                             ? 100.0 * saving /
+                                   ((double)range_bytes * 8.0)
+                             : 0.0;
+        fprintf(stderr,
+                "calibration-factor plane=%d factor=%s states=0 "
+                "decisions=%llu scored=%llu forward-saving-bits=%.6f "
+                "forward-saving-percent=%.9f\n",
+                trace->plane_role,
+                calibration_combination_names[combination],
+                (unsigned long long)decisions,
+                (unsigned long long)scored, saving, percent);
+        for (int decision = 0; decision < CALIBRATION_DECISIONS;
+             ++decision) {
+            double decision_saving =
+                trace->combination_saving_bits[combination][decision];
+            double decision_percent =
+                range_bytes
+                    ? 100.0 * decision_saving /
+                          ((double)range_bytes * 8.0)
+                    : 0.0;
+            fprintf(stderr,
+                    "calibration-decision plane=%d factor=%s decision=%s "
+                    "decisions=%llu scored=%llu forward-saving-bits=%.6f "
+                    "forward-saving-percent=%.9f\n",
+                    trace->plane_role,
+                    calibration_combination_names[combination],
+                    calibration_decision_names[decision],
+                    (unsigned long long)
+                        trace->combination_decisions[combination][decision],
+                    (unsigned long long)
+                        trace->combination_scored[combination][decision],
+                    decision_saving, decision_percent);
+        }
+    }
+}
+
+enum {
+    HIERARCHY_GATE_ZERO,
+    HIERARCHY_GATE_MAGNITUDE_HEAD,
+    HIERARCHY_GATE_MAGNITUDE_TAIL,
+    HIERARCHY_GATE_MANTISSA,
+    HIERARCHY_GATE_SIGN,
+    HIERARCHY_GATE_DECISIONS
+};
+
+typedef struct {
+    uint8_t weight;
+    uint8_t initialized;
+} HierarchyGate;
+
+typedef struct {
+    HierarchyGate gate[HIERARCHY_GATE_DECISIONS][NACT][3];
+    double baseline_bits[HIERARCHY_GATE_DECISIONS];
+    double candidate_bits[HIERARCHY_GATE_DECISIONS];
+    uint64_t decisions[HIERARCHY_GATE_DECISIONS];
+    uint64_t increases;
+    uint64_t decreases;
+    uint64_t unchanged;
+    uint64_t lower_saturations;
+    uint64_t upper_saturations;
+    uint64_t fixed_mismatches;
+    uint64_t fixed_error;
+    int plane_role;
+} HierarchyGateTrace;
+
+static QLIC_FORCEINLINE Prob hierarchy_gate_mix(Prob child, Prob parent,
+                                                unsigned weight) {
+    unsigned mixed = weight * (unsigned)child +
+                     (256u - weight) * (unsigned)parent + 128u;
+    mixed >>= 8;
+    if (!mixed) mixed = 1;
+    if (mixed >= PROB_ONE) mixed = PROB_ONE - 1u;
+    return (Prob)mixed;
+}
+
+static HierarchyGateTrace *hierarchy_gate_trace_create(int plane_role) {
+    HierarchyGateTrace *trace = calloc(1, sizeof(*trace));
+    if (!trace) return NULL;
+    context_cache_cost_init();
+    trace->plane_role = plane_role;
+    return trace;
+}
+
+static QLIC_FORCEINLINE void hierarchy_gate_trace_bit(
+    HierarchyGateTrace *trace, int kind, int activity, int group, Prob child,
+    Prob parent, unsigned initial_weight, int bit,
+    Prob baseline_probability) {
+    if ((unsigned)kind >= HIERARCHY_GATE_DECISIONS ||
+        (unsigned)activity >= NACT || (unsigned)group >= 3u ||
+        initial_weight > 255u)
+        return;
+    Prob fixed = hierarchy_gate_mix(child, parent, initial_weight);
+    if (fixed != baseline_probability) {
+        trace->fixed_mismatches++;
+        trace->fixed_error +=
+            fixed > baseline_probability ? fixed - baseline_probability
+                                         : baseline_probability - fixed;
+    }
+    HierarchyGate *gate = &trace->gate[kind][activity][group];
+    if (!gate->initialized) {
+        gate->weight = (uint8_t)initial_weight;
+        gate->initialized = 1u;
+    }
+    Prob candidate = hierarchy_gate_mix(child, parent, gate->weight);
+    unsigned baseline_index =
+        baseline_probability < PROB_ONE ? baseline_probability : PROB_ONE - 1u;
+    unsigned candidate_index =
+        candidate < PROB_ONE ? candidate : PROB_ONE - 1u;
+    trace->baseline_bits[kind] +=
+        context_cache_bit_cost[baseline_index][bit != 0];
+    trace->candidate_bits[kind] +=
+        context_cache_bit_cost[candidate_index][bit != 0];
+    trace->decisions[kind]++;
+    if (child == parent) {
+        trace->unchanged++;
+        return;
+    }
+    int increase = ((bit == 0) == (child > parent));
+    if (increase) {
+        if (gate->weight < 255u) {
+            gate->weight++;
+            trace->increases++;
+        } else {
+            trace->upper_saturations++;
+        }
+    } else if (gate->weight) {
+        gate->weight--;
+        trace->decreases++;
+    } else {
+        trace->lower_saturations++;
+    }
+}
+
+static double hierarchy_gate_total(const double *bits) {
+    double total = 0.0;
+    for (int kind = 0; kind < HIERARCHY_GATE_DECISIONS; ++kind)
+        total += bits[kind];
+    return total;
+}
+
+static void hierarchy_gate_trace_print(HierarchyGateTrace *trace,
+                                       size_t range_bytes) {
+    static const char *names[HIERARCHY_GATE_DECISIONS] = {
+        "zero", "magnitude-head", "magnitude-tail", "mantissa", "sign"};
+    double baseline = hierarchy_gate_total(trace->baseline_bits);
+    double candidate = hierarchy_gate_total(trace->candidate_bits);
+    fprintf(stderr,
+            "hierarchy-gate plane=%d range-bytes=%zu baseline-bits=%.6f "
+            "candidate-bits=%.6f stream-percent=%.9f fixed-mismatches=%llu "
+            "fixed-error=%llu increases=%llu decreases=%llu unchanged=%llu "
+            "lower-saturations=%llu upper-saturations=%llu\n",
+            trace->plane_role, range_bytes, baseline, candidate,
+            context_stream_delta(candidate, baseline, range_bytes),
+            (unsigned long long)trace->fixed_mismatches,
+            (unsigned long long)trace->fixed_error,
+            (unsigned long long)trace->increases,
+            (unsigned long long)trace->decreases,
+            (unsigned long long)trace->unchanged,
+            (unsigned long long)trace->lower_saturations,
+            (unsigned long long)trace->upper_saturations);
+    for (int kind = 0; kind < HIERARCHY_GATE_DECISIONS; ++kind) {
+        unsigned weight_sum = 0;
+        unsigned weight_count = 0;
+        unsigned weight_min = 255;
+        unsigned weight_max = 0;
+        for (int activity = 0; activity < NACT; ++activity)
+            for (int group = 0; group < 3; ++group) {
+                HierarchyGate *gate = &trace->gate[kind][activity][group];
+                if (!gate->initialized) continue;
+                weight_sum += gate->weight;
+                weight_count++;
+                if (gate->weight < weight_min) weight_min = gate->weight;
+                if (gate->weight > weight_max) weight_max = gate->weight;
+            }
+        fprintf(stderr,
+                "hierarchy-gate-decision plane=%d kind=%s decisions=%llu "
+                "baseline-bits=%.6f candidate-bits=%.6f states=%u "
+                "weight-mean=%.6f weight-min=%u weight-max=%u\n",
+                trace->plane_role, names[kind],
+                (unsigned long long)trace->decisions[kind],
+                trace->baseline_bits[kind], trace->candidate_bits[kind],
+                weight_count,
+                weight_count ? (double)weight_sum / weight_count : 0.0,
+                weight_count ? weight_min : 0, weight_max);
+    }
+    const char *state_value = getenv("QLIC_TRACE_HIERARCHY_GATE_STATES");
+    if (state_value && state_value[0] && state_value[0] != '0')
+        for (int kind = 0; kind < HIERARCHY_GATE_DECISIONS; ++kind)
+            for (int activity = 0; activity < NACT; ++activity)
+                for (int group = 0; group < 3; ++group) {
+                    HierarchyGate *gate =
+                        &trace->gate[kind][activity][group];
+                    if (gate->initialized)
+                        fprintf(stderr,
+                                "hierarchy-gate-state plane=%d kind=%s "
+                                "activity=%d group=%d weight=%u\n",
+                                trace->plane_role, names[kind], activity,
+                                group, (unsigned)gate->weight);
+                }
+}
+#endif
 
 static uint8_t predictor_nbits_lut[1024];
 static uint8_t predictor_cost_lut[257];
@@ -669,7 +1988,9 @@ static void model_init_bases(void) {
         activity_ctx_lut[i] =
             (uint8_t)(i <= 2u ? i : predictor_nbits_lut[i - 1u] + 1u);
     for (int d = -255; d <= 255; ++d) {
-        int e = ((d + 128) & 255) - 128;
+        int e = d;
+        if (e < -128) e += 256;
+        else if (e > 127) e -= 256;
         unsigned v = (unsigned)(e < 0 ? -e : e);
         unsigned z = e >= 0 ? 2u * (unsigned)e : (unsigned)(-2 * e - 1);
         predictor_diff_cost8[d + 255] = predictor_cost_lut[v];
@@ -680,7 +2001,9 @@ static void model_init_bases(void) {
 #endif
     }
     for (int d = -511; d <= 511; ++d) {
-        int e = ((d + 256) & 511) - 256;
+        int e = d;
+        if (e < -256) e += 512;
+        else if (e > 255) e -= 512;
         unsigned v = (unsigned)(e < 0 ? -e : e);
         unsigned z = e >= 0 ? 2u * (unsigned)e : (unsigned)(-2 * e - 1);
         predictor_diff_cost9[d + 511] = predictor_cost_lut[v];
@@ -740,6 +2063,7 @@ static void model37_init(Model37 *m) {
     model_ensure();
     probabilities_init((Prob *)m, sizeof(*m) / sizeof(Prob));
 }
+
 
 static int nbits(unsigned v) {
 #ifdef _MSC_VER
@@ -972,6 +2296,14 @@ static int plane_context_for(int mode) {
     return mode >= 44 && mode <= 54 ? mode - 43 : 0;
 }
 
+static int mode_has_context_map(int mode) {
+    return mode == 41 || (mode >= 44 && mode <= 54);
+}
+
+static int mode_has_local_state(int mode) {
+    return mode >= 52 && mode <= 54;
+}
+
 /* wrapped residuals are asymmetric at the edge, this code point keeps them reversible */
 static unsigned map_res(int e, int pos, int half, int maxv) {
     if (!pos) return e >= 0 ? 2u * (unsigned)e : (unsigned)(-2 * e - 1);
@@ -1036,7 +2368,7 @@ static int predictx(int id, int W, int N, int NW, int NE, int WW, int NN, int ma
     case 27: return clampi((4 * W + N - 2 * NW + NE + 2) >> 2, 0, maxv);
     case 28: return clampi((W + N + NE - NW + 1) >> 1, 0, maxv);
     case 29: return clampi((6 * W + 2 * N - 5 * NW + NE + 2) >> 2, 0, maxv);
-    case 30: return clampi((2 * W + 6 * N - 5 * NW + NE + 2) >> 2, 0, maxv);
+    case 30:
     default: return clampi((2 * W + 6 * N - 5 * NW + NE + 2) >> 2, 0, maxv);
     }
 }
@@ -1204,6 +2536,273 @@ static QLIC_FORCEINLINE void predictor_costs37(
     ADD_XZR(14, clampi((W + 2 * N + NE + 2) >> 2, 0, maxv));
 #undef ADD_XZR
 }
+
+#ifdef QLIC_STREAM_TRACE
+enum { PREDICTOR_ORACLE_LEVELS = 6 };
+
+typedef struct {
+    uint64_t proxy;
+    uint64_t second_gap;
+    uint64_t choices[NPREDX];
+    uint64_t regions;
+    uint64_t horizontal_transitions;
+    uint64_t horizontal_pairs;
+    uint64_t vertical_transitions;
+    uint64_t vertical_pairs;
+    uint64_t runs;
+    uint8_t *previous_row;
+    int previous_choice;
+} PredictorOracleStats;
+
+static void predictor_oracle_record(PredictorOracleStats *stats,
+                                    uint32_t x, uint32_t y, int best,
+                                    uint64_t proxy, uint64_t second_gap) {
+    stats->proxy += proxy;
+    stats->second_gap += second_gap;
+    stats->choices[best]++;
+    stats->regions++;
+    if (x) {
+        stats->horizontal_pairs++;
+        if (best != stats->previous_choice)
+            stats->horizontal_transitions++;
+    }
+    if (!x || best != stats->previous_choice) stats->runs++;
+    stats->previous_choice = best;
+    if (y) {
+        stats->vertical_pairs++;
+        if (best != stats->previous_row[x])
+            stats->vertical_transitions++;
+    }
+    stats->previous_row[x] = (uint8_t)best;
+}
+
+static void predictor_oracle_best(const uint64_t cost[NPREDX], int *best_out,
+                                  uint64_t *best_cost_out,
+                                  uint64_t *second_gap_out) {
+    int best = 0, second = 1;
+    if (cost[second] < cost[best]) {
+        int swap = best;
+        best = second;
+        second = swap;
+    }
+    for (int predictor = 2; predictor < NPREDX; ++predictor) {
+        if (cost[predictor] < cost[best]) {
+            second = best;
+            best = predictor;
+        } else if (cost[predictor] < cost[second]) {
+            second = predictor;
+        }
+    }
+    *best_out = best;
+    *best_cost_out = cost[best];
+    *second_gap_out = cost[second] - cost[best];
+}
+
+static double predictor_oracle_entropy(const PredictorOracleStats *stats) {
+    double bits = 0.0;
+    if (!stats->regions) return 0.0;
+    for (int predictor = 0; predictor < NPREDX; ++predictor) {
+        uint64_t count = stats->choices[predictor];
+        if (count)
+            bits += (double)count *
+                    log2((double)stats->regions / (double)count);
+    }
+    return bits;
+}
+
+static void predictor_oracle_print_scale(int plane, const char *name,
+                                         unsigned size,
+                                         const PredictorOracleStats *stats) {
+    fprintf(stderr,
+            "predictor-oracle-scale plane=%d scale=%s size=%u regions=%llu "
+            "proxy=%llu selector-entropy-bits=%.6f second-gap=%llu "
+            "horizontal-transitions=%llu horizontal-pairs=%llu "
+            "vertical-transitions=%llu vertical-pairs=%llu runs=%llu\n",
+            plane, name, size, (unsigned long long)stats->regions,
+            (unsigned long long)stats->proxy,
+            predictor_oracle_entropy(stats),
+            (unsigned long long)stats->second_gap,
+            (unsigned long long)stats->horizontal_transitions,
+            (unsigned long long)stats->horizontal_pairs,
+            (unsigned long long)stats->vertical_transitions,
+            (unsigned long long)stats->vertical_pairs,
+            (unsigned long long)stats->runs);
+    fprintf(stderr, "predictor-oracle-choices plane=%d scale=%s counts=",
+            plane, name);
+    for (int predictor = 0; predictor < NPREDX; ++predictor) {
+        if (predictor) fputc(',', stderr);
+        fprintf(stderr, "%llu",
+                (unsigned long long)stats->choices[predictor]);
+    }
+    fputc('\n', stderr);
+}
+
+static void predictor_oracle_trace(const uint16_t *plane_samples, uint32_t w,
+                                   uint32_t h, int depth, int tlog,
+                                   const uint8_t *map, uint32_t map_width,
+                                   int plane) {
+    static const unsigned sizes[PREDICTOR_ORACLE_LEVELS] = {
+        2u, 4u, 8u, 16u, 32u, 64u
+    };
+    const uint8_t *diff_cost = depth == 8 ? predictor_diff_cost8
+                                           : predictor_diff_cost9;
+    int maxv = (1 << depth) - 1;
+    int half = 1 << (depth - 1);
+    PredictorOracleStats pixel = {0};
+    PredictorOracleStats level[PREDICTOR_ORACLE_LEVELS] = {{0}};
+    PredictorOracleStats whole = {0};
+    uint64_t *level_cost[PREDICTOR_ORACLE_LEVELS] = {0};
+    uint32_t level_width[PREDICTOR_ORACLE_LEVELS] = {0};
+    uint64_t whole_cost[NPREDX] = {0};
+    uint64_t current_proxy = 0;
+    uint64_t current_equals_pixel_id = 0;
+    uint64_t current_equals_pixel_cost = 0;
+    uint64_t current_regret = 0;
+    uint64_t current_rank[NPREDX] = {0};
+    uint64_t purity_majority = 0, purity_total = 0;
+    int complete = 0;
+    uint32_t tile_size = tlog ? 1u << tlog : 1u;
+    uint32_t purity_width = (w + tile_size - 1u) / tile_size;
+    uint32_t *purity = calloc((size_t)purity_width * NPREDX,
+                              sizeof(*purity));
+    pixel.previous_row = malloc(w ? w : 1u);
+    whole.previous_row = malloc(1u);
+    if (!purity || !pixel.previous_row || !whole.previous_row) goto allocation;
+    memset(pixel.previous_row, 0, w);
+    memset(whole.previous_row, 0, 1u);
+    for (int index = 0; index < PREDICTOR_ORACLE_LEVELS; ++index) {
+        level_width[index] = (w + sizes[index] - 1u) / sizes[index];
+        level_cost[index] = calloc((size_t)level_width[index] * NPREDX,
+                                   sizeof(*level_cost[index]));
+        level[index].previous_row = malloc(level_width[index]);
+        if (!level_cost[index] || !level[index].previous_row) goto allocation;
+        memset(level[index].previous_row, 0, level_width[index]);
+    }
+    for (uint32_t y = 0; y < h; ++y) {
+        const uint16_t *row = plane_samples + (size_t)y * w;
+        const uint16_t *up = y ? row - w : row;
+        const uint16_t *up2 = y > 1 ? up - w : up;
+        for (uint32_t x = 0; x < w; ++x) {
+            int Wv, Nv, NWv, NEv;
+            Wv = x ? row[x - 1] : (y ? up[x] : half);
+            Nv = y ? up[x] : Wv;
+            NWv = x && y ? up[x - 1] : Nv;
+            NEv = y && x + 1u < w ? up[x + 1] : Nv;
+            int WWv = x > 1 ? row[x - 2] : Wv;
+            int NNv = y > 1 ? up2[x] : Nv;
+            uint64_t cost[NPREDX] = {0};
+            predictor_costs37_one(cost, diff_cost, row[x], maxv, Wv, Nv,
+                                  NWv, NEv, WWv, NNv);
+            int best = 0;
+            uint64_t best_cost = 0, second_gap = 0;
+            predictor_oracle_best(cost, &best, &best_cost, &second_gap);
+            predictor_oracle_record(&pixel, x, y, best, best_cost, second_gap);
+            purity[((size_t)(x / tile_size) * NPREDX) + (size_t)best]++;
+            int current = tlog
+                              ? map[(size_t)(y >> tlog) * map_width +
+                                    (x >> tlog)]
+                              : 0;
+            uint64_t current_cost = cost[current];
+            unsigned rank = 0;
+            for (int predictor = 0; predictor < NPREDX; ++predictor) {
+                whole_cost[predictor] += cost[predictor];
+                if (cost[predictor] < current_cost) rank++;
+            }
+            current_proxy += current_cost;
+            current_equals_pixel_id += current == best;
+            current_equals_pixel_cost += current_cost == best_cost;
+            current_regret += current_cost - best_cost;
+            current_rank[rank]++;
+            uint64_t *small = level_cost[0] +
+                              (size_t)(x >> 1) * NPREDX;
+            for (int predictor = 0; predictor < NPREDX; ++predictor)
+                small[predictor] += cost[predictor];
+        }
+        if ((y + 1u) % tile_size == 0 || y + 1u == h) {
+            for (uint32_t tx = 0; tx < purity_width; ++tx) {
+                uint32_t *counts = purity + (size_t)tx * NPREDX;
+                uint32_t total = 0, majority = 0;
+                for (int predictor = 0; predictor < NPREDX; ++predictor) {
+                    total += counts[predictor];
+                    if (counts[predictor] > majority)
+                        majority = counts[predictor];
+                }
+                purity_total += total;
+                purity_majority += majority;
+            }
+            memset(purity, 0,
+                   (size_t)purity_width * NPREDX * sizeof(*purity));
+        }
+        for (int index = 0; index < PREDICTOR_ORACLE_LEVELS; ++index) {
+            unsigned size = sizes[index];
+            if ((y + 1u) % size != 0 && y + 1u != h) continue;
+            uint32_t ty = y / size;
+            for (uint32_t tx = 0; tx < level_width[index]; ++tx) {
+                uint64_t *cost = level_cost[index] +
+                                 (size_t)tx * NPREDX;
+                int best = 0;
+                uint64_t best_cost = 0, second_gap = 0;
+                predictor_oracle_best(cost, &best, &best_cost, &second_gap);
+                predictor_oracle_record(&level[index], tx, ty, best,
+                                        best_cost, second_gap);
+                if (index + 1 < PREDICTOR_ORACLE_LEVELS) {
+                    uint64_t *parent = level_cost[index + 1] +
+                                       (size_t)(tx >> 1) * NPREDX;
+                    for (int predictor = 0; predictor < NPREDX; ++predictor)
+                        parent[predictor] += cost[predictor];
+                }
+            }
+            memset(level_cost[index], 0,
+                   (size_t)level_width[index] * NPREDX *
+                       sizeof(*level_cost[index]));
+        }
+    }
+    {
+        int best = 0;
+        uint64_t best_cost = 0, second_gap = 0;
+        predictor_oracle_best(whole_cost, &best, &best_cost, &second_gap);
+        predictor_oracle_record(&whole, 0, 0, best, best_cost, second_gap);
+    }
+    fprintf(stderr,
+            "predictor-oracle-plane plane=%d pixels=%zu depth=%d tile=%d "
+            "current-proxy=%llu pixel-proxy=%llu current-regret=%llu "
+            "current-equals-pixel-id=%llu current-equals-pixel-cost=%llu "
+            "purity-majority=%llu purity-total=%llu\n",
+            plane, (size_t)w * h, depth, tlog,
+            (unsigned long long)current_proxy,
+            (unsigned long long)pixel.proxy,
+            (unsigned long long)current_regret,
+            (unsigned long long)current_equals_pixel_id,
+            (unsigned long long)current_equals_pixel_cost,
+            (unsigned long long)purity_majority,
+            (unsigned long long)purity_total);
+    fprintf(stderr, "predictor-oracle-rank plane=%d counts=", plane);
+    for (int rank = 0; rank < NPREDX; ++rank) {
+        if (rank) fputc(',', stderr);
+        fprintf(stderr, "%llu", (unsigned long long)current_rank[rank]);
+    }
+    fputc('\n', stderr);
+    predictor_oracle_print_scale(plane, "pixel", 1u, &pixel);
+    for (int index = 0; index < PREDICTOR_ORACLE_LEVELS; ++index) {
+        char name[16];
+        snprintf(name, sizeof(name), "%ux%u", sizes[index], sizes[index]);
+        predictor_oracle_print_scale(plane, name, sizes[index], &level[index]);
+    }
+    predictor_oracle_print_scale(plane, "plane", 0u, &whole);
+    complete = 1;
+allocation:
+    if (!complete)
+        fprintf(stderr,
+                "predictor-oracle-skip plane=%d reason=allocation\n", plane);
+    free(purity);
+    free(pixel.previous_row);
+    free(whole.previous_row);
+    for (int index = 0; index < PREDICTOR_ORACLE_LEVELS; ++index) {
+        free(level_cost[index]);
+        free(level[index].previous_row);
+    }
+}
+#endif
 
 static int sign_hint(int W, int N, int NW, int NE, int WW, int NN, int pr, int maxv) {
     int ref = gapp(W, N, NW, NE, WW, NN, maxv);
@@ -1866,8 +3465,8 @@ static QLIC_FORCEINLINE int encode_plane37_impl(
     int exact_ctx = context_mode >= 8;
     int exact_sign = exact_ctx;
     int exact_sign_k = context_mode >= 9;
-    int refined_sign = context_mode >= 10;
-    int weighted_mode = context_mode >= 11;
+    int refined_sign = context_mode >= 10 && context_mode <= 11;
+    int weighted_mode = context_mode == 11;
     int slow_zero = 0;
     int slow_mag = refined_sign ? 2 : slow_root;
     int slow_sign = refined_sign ? 2 : slow_root;
@@ -2108,7 +3707,8 @@ static QLIC_FORCEINLINE int encode_plane37_impl(
                         enc_bit_mix(enc, u1, &m->unary[ctx][1], 0);
                     else {
                         enc_bit(enc, u1, 0);
-                        if (cross_mag) prob_update(&m->unary[ctx][1], 0, enc->adapt);
+                        if (cross_mag)
+                            prob_update(&m->unary[ctx][1], 0, enc->adapt);
                     }
                 } else {
                     if (root_ctx) {
@@ -2135,7 +3735,8 @@ static QLIC_FORCEINLINE int encode_plane37_impl(
                         enc_bit_mix(enc, u1, &m->unary[ctx][1], 1);
                     else {
                         enc_bit(enc, u1, 1);
-                        if (cross_mag) prob_update(&m->unary[ctx][1], 1, enc->adapt);
+                        if (cross_mag)
+                            prob_update(&m->unary[ctx][1], 1, enc->adapt);
                     }
                     for (int i = 2; i < k; i++) {
                         if (root_ctx)
@@ -2161,16 +3762,20 @@ static QLIC_FORCEINLINE int encode_plane37_impl(
                     }
                 }
             }
-            for (int i = k - 2; i >= 0; i--) {
+            int tail_top = k - 2;
+            for (int i = tail_top; i >= 0; i--) {
                 int bit = (v >> i) & 1u;
                 if (root_ctx)
-                    enc_bit_root(enc, &m->mant[ctx][k][i],
-                                 &coarse_full.mant[base_ctx][k][i],
-                                 &root_full.mant[aq][k][i], bit, slow_mant);
+                    enc_bit_root(enc, &m->mant[ctx][k - 2][i],
+                                 &coarse_full.mant[base_ctx][k - 2][i],
+                                 &root_full.mant[aq][k - 2][i], bit,
+                                 slow_mant);
                 else if (full_coarse)
-                    enc_bit_coarse(enc, &m->mant[ctx][k][i],
-                                   &coarse_full.mant[base_ctx][k][i], bit);
-                else enc_bit(enc, &m->mant[ctx][k][i], bit);
+                    enc_bit_coarse(enc, &m->mant[ctx][k - 2][i],
+                                   &coarse_full.mant[base_ctx][k - 2][i],
+                                   bit);
+                else
+                    enc_bit(enc, &m->mant[ctx][k - 2][i], bit);
             }
             if (k) {
                 int neg = e < 0;
@@ -2193,7 +3798,8 @@ static QLIC_FORCEINLINE int encode_plane37_impl(
                 if (root_ctx) {
                     Prob *cp = hint ? &coarse.sg[base_ctx][hint < 0]
                                     : &coarse.nz[base_ctx];
-                    Prob *rp = hint ? &root.sg[aq][hint < 0] : &root.nz[aq];
+                    Prob *rp = hint ? &root.sg[aq][hint < 0]
+                                    : &root.nz[aq];
                     int kb = exact_sign_k ? (k <= 1 ? 0 : k <= 3 ? 1 : 2) : 0;
                     Prob *ep = hint ? &predictor.sg[pid][base_ctx][kb][hint < 0]
                                     : &predictor.nz[pid][base_ctx][kb];
@@ -2841,7 +4447,7 @@ static int decode_plane45_mapfree(Dec *dec, uint16_t *pl, uint32_t w,
                 v = 1u << (k - 1);
                 for (int i = k - 2; i >= 0; i--) {
                     int bit;
-                    DEC45_BIT(&m->mant[ctx][k][i], bit);
+                    DEC45_BIT(&m->mant[ctx][k - 2][i], bit);
                     v |= (unsigned)bit << i;
                 }
             }
@@ -2898,8 +4504,10 @@ static int decode_plane45_mapfree(Dec *dec, uint16_t *pl, uint32_t w,
 }
 
 static QLIC_FORCEINLINE int decode_plane37_impl(
-    Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog,
-    int cmap, int context_mode, uint8_t *state_out, const uint8_t *state_in) {
+    Dec *QLIC_RESTRICT dec, uint16_t *QLIC_RESTRICT pl,
+    uint32_t w, uint32_t h, int depth, int tlog,
+    int cmap, int context_mode, uint8_t *state_out, const uint8_t *state_in,
+    int adapt) {
     if (context_mode == 2 && !tlog)
         return decode_plane45_mapfree(dec, pl, w, h, depth, state_out,
                                       state_in);
@@ -2918,14 +4526,89 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
     int exact_ctx = context_mode >= 8;
     int exact_sign = exact_ctx;
     int exact_sign_k = context_mode >= 9;
-    int refined_sign = context_mode >= 10;
-    int weighted_mode = context_mode >= 11;
+    int refined_sign = context_mode >= 10 && context_mode <= 11;
+    int weighted_mode = context_mode == 11;
     int slow_zero = 0;
     int slow_mag = refined_sign ? 2 : slow_root;
     int slow_sign = refined_sign ? 2 : slow_root;
     int slow_unary = 0;
     int slow_mant = slow_root;
     int fast_mag = 0, fast_sign = slow_root;
+#ifdef QLIC_STREAM_TRACE
+    int plane_role =
+        state_out ? (state_in ? 1 : 0) : (state_in ? 2 : 3);
+    const char *qst2_trace_value = getenv("QLIC_TRACE_QST2");
+    int qst2_trace = context_mode == 9 && qst2_trace_value &&
+                     qst2_trace_value[0] && qst2_trace_value[0] != '0';
+    const char *context_cache_value = getenv("QLIC_TRACE_CONTEXT_CACHE");
+    int context_cache_enabled =
+        context_mode == 9 && context_cache_value && context_cache_value[0] &&
+        context_cache_value[0] != '0';
+    const uint8_t *context_cache_range_begin = dec->ptr;
+    ContextCacheTrace *context_cache_trace = NULL;
+    const char *calibration_value = getenv("QLIC_TRACE_CALIBRATION");
+    int calibration_enabled =
+        context_mode == 9 && calibration_value && calibration_value[0] &&
+        calibration_value[0] != '0';
+    const uint8_t *calibration_range_begin = dec->ptr;
+    CalibrationTrace *calibration_trace = NULL;
+    const char *hierarchy_gate_value = getenv("QLIC_TRACE_HIERARCHY_GATE");
+    int hierarchy_gate_enabled =
+        context_mode == 9 && hierarchy_gate_value && hierarchy_gate_value[0] &&
+        hierarchy_gate_value[0] != '0';
+    const uint8_t *hierarchy_gate_range_begin = dec->ptr;
+    HierarchyGateTrace *hierarchy_gate_trace = NULL;
+    const char *qst2_context_value = getenv("QLIC_TRACE_QST2_CONTEXTS");
+    int qst2_context_trace = qst2_trace && qst2_context_value &&
+                             qst2_context_value[0] &&
+                             qst2_context_value[0] != '0';
+    const char *qst2_hist_value = getenv("QLIC_TRACE_QST2_HIST");
+    int qst2_hist_trace = qst2_trace && qst2_hist_value &&
+                          qst2_hist_value[0] &&
+                          qst2_hist_value[0] != '0';
+    const char *predictor_oracle_value =
+        getenv("QLIC_TRACE_PREDICTOR_ORACLE");
+    int predictor_oracle_enabled =
+        context_mode == 9 && predictor_oracle_value &&
+        predictor_oracle_value[0] && predictor_oracle_value[0] != '0';
+#ifdef QLIC_GRADIENT_TOPOLOGY_REPLAY
+    int gradient_topology_enabled = context_mode == 10;
+#else
+    const char *gradient_topology_value =
+        getenv("QLIC_TRACE_GRADIENT_TOPOLOGY");
+    int gradient_topology_enabled =
+        context_mode == 10 && gradient_topology_value &&
+        gradient_topology_value[0] && gradient_topology_value[0] != '0';
+#endif
+    const uint8_t *gradient_topology_range_begin = dec->ptr;
+    GradientTopologyTrace *gradient_topology_trace = NULL;
+    enum {
+        QST2_PREVIOUS_CLASSES = 6,
+        QST2_CROSS_CLASSES = 36,
+        QST2_LOCAL_CLASSES = 5,
+        QST2_STATIC_CONTEXTS =
+            NACT * 4 * QST2_PREVIOUS_CLASSES * QST2_CROSS_CLASSES *
+            QST2_LOCAL_CLASSES,
+        QST2_MAGNITUDE_CLASSES = 9,
+        QST2_BASE_CONTEXTS = NACT * 4 * QST2_PREVIOUS_CLASSES,
+        QST2_LENGTH_CONTEXTS =
+            NACT * 4 * QST2_PREVIOUS_CLASSES * QST2_MAGNITUDE_CLASSES,
+        QST2_K_SYMBOLS = 10,
+        QST2_LENGTH_SYMBOLS = 9,
+        QST2_MANTISSA_SLOTS = 10 * 8,
+        QST2_SIGN_CLASSES = 9
+    };
+    const uint8_t *qst2_range_begin = dec->ptr;
+    uint64_t qst2_decision_begin[DEC_TRACE_COUNT] = {0};
+    uint64_t qst2_renormalization_begin[DEC_TRACE_COUNT] = {0};
+    uint64_t (*qst2_magnitude)[257] = NULL;
+    uint64_t *qst2_k_context = NULL;
+    uint64_t *qst2_length_context = NULL;
+    uint64_t *qst2_mantissa_context = NULL;
+    uint64_t *qst2_sign_context = NULL;
+    uint64_t qst2_sign[NACT][2] = {{0}};
+    size_t qst2_map_bytes = 0;
+#endif
     int local_states = spatial_ctx ? 135 : local_ctx ? 5 : 0;
     int cross_states = state_in ? (local_ctx ? local_states * (state_out ? 6 : 36) : 4) : local_states;
     size_t context_stride = tlog ? (size_t)XCTX : (size_t)NCTX;
@@ -3002,6 +4685,46 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
     uint8_t magnitude_pair[256];
     if (state_in && !state_out)
         channel_pair_tables(zero_pair, magnitude_pair);
+#ifdef QLIC_STREAM_TRACE
+    if (qst2_trace) {
+        memcpy(qst2_decision_begin, dec->trace_decisions,
+               sizeof(qst2_decision_begin));
+        memcpy(qst2_renormalization_begin, dec->trace_renormalizations,
+               sizeof(qst2_renormalization_begin));
+        qst2_magnitude = calloc(NACT, sizeof(*qst2_magnitude));
+        if (!qst2_magnitude) qst2_trace = 0;
+        if (qst2_context_trace) {
+            qst2_k_context = calloc(
+                (size_t)QST2_STATIC_CONTEXTS * QST2_K_SYMBOLS,
+                sizeof(*qst2_k_context));
+            qst2_length_context = calloc(
+                (size_t)QST2_LENGTH_CONTEXTS * QST2_LENGTH_SYMBOLS,
+                sizeof(*qst2_length_context));
+            qst2_mantissa_context = calloc(
+                (size_t)QST2_BASE_CONTEXTS * QST2_MANTISSA_SLOTS * 2u,
+                sizeof(*qst2_mantissa_context));
+            qst2_sign_context = calloc(
+                (size_t)QST2_STATIC_CONTEXTS * QST2_SIGN_CLASSES * 2u,
+                sizeof(*qst2_sign_context));
+            if (!qst2_k_context || !qst2_length_context ||
+                !qst2_mantissa_context ||
+                !qst2_sign_context) {
+                free(qst2_k_context);
+                free(qst2_length_context);
+                free(qst2_mantissa_context);
+                free(qst2_sign_context);
+                qst2_k_context = NULL;
+                qst2_length_context = NULL;
+                qst2_mantissa_context = NULL;
+                qst2_sign_context = NULL;
+                qst2_context_trace = 0;
+            }
+        }
+    }
+#endif
+#ifdef QLIC_STREAM_TRACE
+    if (qst2_trace) dec->trace_class = DEC_TRACE_MAP;
+#endif
     if (tlog) {
         for (size_t i = 0; i < ntiles; i++) {
             int pid = -1;
@@ -3022,12 +4745,61 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
             tp[i] = (uint8_t)pid;
         }
     }
+#ifdef QLIC_STREAM_TRACE
+    if (qst2_trace)
+        qst2_map_bytes = (size_t)(dec->ptr - qst2_range_begin);
+#endif
     WeightedPredictor weighted;
     memset(&weighted, 0, sizeof(weighted));
     if (weighted_mode && !weighted_predictor_init(&weighted, w)) {
+#ifdef QLIC_STREAM_TRACE
+        free(qst2_magnitude);
+        free(qst2_k_context);
+        free(qst2_length_context);
+        free(qst2_mantissa_context);
+        free(qst2_sign_context);
+#endif
         free(models);
         return STREAM_E_ALLOC;
     }
+#ifdef QLIC_STREAM_TRACE
+    if (context_cache_enabled) {
+        context_cache_trace =
+            context_cache_trace_create((size_t)w * h, plane_role);
+        if (!context_cache_trace)
+            fprintf(stderr,
+                    "context-cache-skip plane=%d pixels=%zu reason=allocation\n",
+                    plane_role, (size_t)w * h);
+    }
+    if (calibration_enabled) {
+        calibration_trace = calibration_trace_create(plane_role);
+        if (!calibration_trace)
+            fprintf(stderr,
+                    "calibration-skip plane=%d pixels=%zu reason=allocation\n",
+                    plane_role, (size_t)w * h);
+    }
+    if (hierarchy_gate_enabled) {
+        hierarchy_gate_trace = hierarchy_gate_trace_create(plane_role);
+        if (!hierarchy_gate_trace)
+            fprintf(stderr,
+                    "hierarchy-gate-skip plane=%d pixels=%zu reason=allocation\n",
+                    plane_role, (size_t)w * h);
+    }
+    if (gradient_topology_enabled) {
+        size_t zero_contexts = cross_count ? cross_count : context_stride;
+        size_t magnitude_contexts = mag_count ? mag_count : context_stride;
+        gradient_topology_trace = gradient_topology_trace_create(
+            zero_contexts, magnitude_contexts, plane_role);
+        if (!gradient_topology_trace)
+            fprintf(stderr,
+                    "gradient-topology-skip plane=%d pixels=%zu "
+                    "reason=allocation\n",
+                    plane_role, (size_t)w * h);
+    }
+#endif
+    /* Local range state; commit after the pixel loop. */
+    Dec local_dec = *dec;
+    Dec *QLIC_RESTRICT bit_dec = &local_dec;
     for (uint32_t y = 0; y < h; y++) {
         uint16_t *row = pl + (size_t)y * w;
         const uint16_t *up = y ? row - w : row;
@@ -3050,7 +4822,69 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
             int base_ctx = ectx(aq, ck, cs, 1);
             int ctx = base_ctx + pctx2(pid);
             size_t pi = (size_t)y * w + x;
-            int zero_state = local_ctx ? local_zero_ctx(prevk, uk, prevs, us) : 0;
+#ifdef QLIC_STREAM_TRACE
+            unsigned gradient_signature = gradient_topology_trace
+                ? gradient_topology_signature(
+                      Wv, Nv, NWv, NEv, WWv, NNv)
+                : 0;
+            int gradient_predictor_family = pctx2(pid) / NCTX;
+            size_t gradient_zero_context = (size_t)ctx;
+            size_t gradient_magnitude_context = (size_t)ctx;
+            uint32_t context_cache_key = 0;
+            Prob context_zero_probability = PROB_INIT;
+            Prob context_magnitude_probability[2] = {PROB_INIT, PROB_INIT};
+            Prob context_sign_probability = PROB_INIT;
+            int context_coded_sign = 0;
+            if (context_cache_trace) {
+                int cross_state = state_in ? state_in[pi] : 0;
+                context_cache_key = context_cache_signature(
+                    pid, aq, prevk, prevs, uk, us, cross_state,
+                    context_cache_trace->plane_role);
+            }
+            int qst2_static_context = 0;
+            int qst2_length_static_context = 0;
+            int qst2_base_static_context = 0;
+            if (qst2_context_trace) {
+                int family = pctx2(pid) / NCTX;
+                int local_class =
+                    local_zero_ctx(prevk, uk, prevs, us);
+                int previous = ck == 0 ? 0
+                             : ck <= 2 ? (cs > 0 ? 1 : 2)
+                             : ck <= 4 ? (cs > 0 ? 3 : 4)
+                                       : 5;
+                int cross_class = 0;
+                if (state_in) {
+                    int channel = state_in[pi];
+                    if (state_out) {
+                        cross_class = channel_zero_state(channel);
+                    } else {
+                        cross_class = zero_pair[channel];
+                    }
+                }
+                qst2_static_context =
+                    (((aq * 4 + family) * QST2_PREVIOUS_CLASSES + previous) *
+                         QST2_CROSS_CLASSES + cross_class) *
+                        QST2_LOCAL_CLASSES +
+                    local_class;
+                int magnitude_class = 0;
+                if (state_in) {
+                    int channel = state_in[pi];
+                    magnitude_class =
+                        state_out ? channel_magnitude_state(channel)
+                                  : magnitude_pair[channel];
+                }
+                qst2_length_static_context =
+                    ((aq * 4 + family) * QST2_PREVIOUS_CLASSES + previous) *
+                        QST2_MAGNITUDE_CLASSES +
+                    magnitude_class;
+                qst2_base_static_context =
+                    (aq * 4 + family) * QST2_PREVIOUS_CLASSES + previous;
+            }
+#endif
+            /* The nonzero sign model uses this same five-way class below. */
+            int local_state =
+                local_ctx ? local_zero_ctx(prevk, uk, prevs, us) : 0;
+            int zero_state = local_state;
             if (spatial_ctx) {
                 int nek = x + 1 < w ? upk[x + 1] : 0;
                 int nes = x + 1 < w ? ups[x + 1] : 0;
@@ -3071,38 +4905,81 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
                     zero_state += state_in[pi];
                 }
             }
+#ifdef QLIC_STREAM_TRACE
+            if (gradient_topology_trace && cross_states)
+                gradient_zero_context =
+                    (size_t)zero_state * context_stride + (size_t)ctx;
+#endif
+            int k = 0;
             Prob *zero_parent = &m->unary[ctx][0];
             Prob *zero = cross_states ? &cross[(size_t)zero_state * context_stride + (size_t)ctx] : zero_parent;
             if (!*zero) *zero = *zero_parent;
-            int k = 0;
             int nonzero;
+#ifdef QLIC_STREAM_TRACE
+            Prob hierarchy_zero_child = PROB_INIT;
+            Prob hierarchy_zero_parent = PROB_INIT;
+            unsigned hierarchy_zero_weight = 0;
+            if (hierarchy_gate_trace) {
+                Prob coarse_mix =
+                    (Prob)((coarse->zero[base_ctx] + root->zero[aq] + 1u) >>
+                           1);
+                if (zero != zero_parent) {
+                    hierarchy_zero_child = *zero;
+                    hierarchy_zero_parent =
+                        (Prob)((*zero_parent + coarse_mix + 1u) >> 1);
+                    hierarchy_zero_weight = 160u;
+                } else {
+                    hierarchy_zero_child = *zero_parent;
+                    hierarchy_zero_parent = coarse_mix;
+                    hierarchy_zero_weight = 128u;
+                }
+            }
+            if (qst2_trace) bit_dec->trace_class = DEC_TRACE_ZERO;
+#endif
             if (root_ctx) {
                 Prob *cp = &coarse->zero[base_ctx];
                 Prob *rp = &root->zero[aq];
                 if (zero != zero_parent) {
                     if (refined_sign)
-                        nonzero = dec_bit_mix4_custom(dec, zero, zero_parent,
+                        nonzero = dec_bit_mix4_custom(bit_dec, zero, zero_parent,
                                                       cp, rp, slow_zero,
                                                       mode53_zero_weight,
-                                                      mode53_zero_rate);
+                                                      mode53_zero_rate, adapt);
                     else
-                        nonzero = dec_bit_mix4(dec, zero, zero_parent, cp, rp,
-                                               slow_zero, 0);
+                        nonzero = dec_bit_mix4(bit_dec, zero, zero_parent, cp, rp,
+                                               slow_zero, 0, adapt);
                 } else
-                    nonzero = dec_bit_root(dec, zero_parent, cp, rp,
-                                           slow_zero);
+                    nonzero = dec_bit_root(bit_dec, zero_parent, cp, rp,
+                                           slow_zero, adapt);
             } else if (coarse_ctx) {
                 Prob *cp = &coarse->zero[base_ctx];
-                if (zero != zero_parent) nonzero = dec_bit_mix3(dec, zero, zero_parent, cp);
-                else nonzero = dec_bit_coarse(dec, zero_parent, cp);
-            } else if (mix_ctx && zero != zero_parent)
-                nonzero = dec_bit_mix(dec, zero, zero_parent);
-            else {
-                nonzero = dec_bit(dec, zero);
                 if (zero != zero_parent)
-                    prob_update(zero_parent, nonzero, dec->adapt);
+                    nonzero = dec_bit_mix3(bit_dec, zero, zero_parent, cp,
+                                           adapt);
+                else
+                    nonzero = dec_bit_coarse(bit_dec, zero_parent, cp, adapt);
+            } else if (mix_ctx && zero != zero_parent)
+                nonzero = dec_bit_mix(bit_dec, zero, zero_parent, adapt);
+            else {
+                nonzero = dec_bit_rate(bit_dec, zero, adapt);
+                if (zero != zero_parent)
+                    prob_update(zero_parent, nonzero, adapt);
             }
+#ifdef QLIC_STREAM_TRACE
+            if (context_cache_trace || calibration_trace ||
+                gradient_topology_trace)
+                context_zero_probability = bit_dec->trace_probability;
+            if (hierarchy_gate_trace)
+                hierarchy_gate_trace_bit(
+                    hierarchy_gate_trace, HIERARCHY_GATE_ZERO, aq, 0,
+                    hierarchy_zero_child, hierarchy_zero_parent,
+                    hierarchy_zero_weight, nonzero,
+                    bit_dec->trace_probability);
+#endif
             if (nonzero) {
+#ifdef QLIC_STREAM_TRACE
+                if (qst2_trace) bit_dec->trace_class = DEC_TRACE_MAGNITUDE;
+#endif
                 k = 1;
                 Prob *u1 = &m->unary[ctx][1];
                 if (cross_mag) {
@@ -3111,7 +4988,32 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
                         magnitude_pair[s];
                     u1 = &cross_mag[(size_t)base * context_stride + (size_t)ctx];
                     if (!*u1) *u1 = m->unary[ctx][1];
+#ifdef QLIC_STREAM_TRACE
+                    if (gradient_topology_trace)
+                        gradient_magnitude_context =
+                            (size_t)base * context_stride + (size_t)ctx;
+#endif
                 }
+#ifdef QLIC_STREAM_TRACE
+                Prob hierarchy_magnitude_child = PROB_INIT;
+                Prob hierarchy_magnitude_parent = PROB_INIT;
+                unsigned hierarchy_magnitude_weight = 0;
+                if (hierarchy_gate_trace) {
+                    Prob coarse_mix =
+                        (Prob)((coarse->mag[base_ctx] + root->mag[aq] + 1u) >>
+                               1);
+                    if (cross_mag) {
+                        hierarchy_magnitude_child = *u1;
+                        hierarchy_magnitude_parent =
+                            (Prob)((m->unary[ctx][1] + coarse_mix + 1u) >> 1);
+                        hierarchy_magnitude_weight = 160u;
+                    } else {
+                        hierarchy_magnitude_child = m->unary[ctx][1];
+                        hierarchy_magnitude_parent = coarse_mix;
+                        hierarchy_magnitude_weight = 128u;
+                    }
+                }
+#endif
                 int more;
                 if (root_ctx) {
                     Prob *parent = &m->unary[ctx][1];
@@ -3119,40 +5021,84 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
                     Prob *rp = &root->mag[aq];
                     if (cross_mag) {
                         if (refined_sign)
-                            more = dec_bit_mix4_custom(dec, u1, parent, cp,
+                            more = dec_bit_mix4_custom(bit_dec, u1, parent, cp,
                                                        rp, slow_mag,
                                                        mode53_magnitude_weight,
-                                                       mode53_magnitude_rate);
+                                                       mode53_magnitude_rate,
+                                                       adapt);
                         else
-                            more = dec_bit_mix4(dec, u1, parent, cp, rp,
-                                                slow_mag, fast_mag);
+                            more = dec_bit_mix4(bit_dec, u1, parent, cp, rp,
+                                                slow_mag, fast_mag, adapt);
                     } else
-                        more = dec_bit_root(dec, parent, cp, rp, slow_mag);
+                        more = dec_bit_root(bit_dec, parent, cp, rp, slow_mag,
+                                            adapt);
                 } else if (coarse_ctx) {
                     Prob *parent = &m->unary[ctx][1];
                     Prob *cp = &coarse->mag[base_ctx];
-                    if (cross_mag) more = dec_bit_mix3(dec, u1, parent, cp);
-                    else more = dec_bit_coarse(dec, parent, cp);
+                    if (cross_mag)
+                        more = dec_bit_mix3(bit_dec, u1, parent, cp, adapt);
+                    else
+                        more = dec_bit_coarse(bit_dec, parent, cp, adapt);
                 } else if (mix_ctx && cross_mag)
-                    more = dec_bit_mix(dec, u1, &m->unary[ctx][1]);
+                    more = dec_bit_mix(bit_dec, u1, &m->unary[ctx][1], adapt);
                 else {
-                    more = dec_bit(dec, u1);
-                    if (cross_mag) prob_update(&m->unary[ctx][1], more, dec->adapt);
+                    more = dec_bit_rate(bit_dec, u1, adapt);
+                    if (cross_mag)
+                        prob_update(&m->unary[ctx][1], more, adapt);
                 }
+#ifdef QLIC_STREAM_TRACE
+                if (context_cache_trace || calibration_trace ||
+                    gradient_topology_trace)
+                    context_magnitude_probability[0] =
+                        bit_dec->trace_probability;
+                if (hierarchy_gate_trace)
+                    hierarchy_gate_trace_bit(
+                        hierarchy_gate_trace,
+                        HIERARCHY_GATE_MAGNITUDE_HEAD, aq, 0,
+                        hierarchy_magnitude_child, hierarchy_magnitude_parent,
+                        hierarchy_magnitude_weight, more,
+                        bit_dec->trace_probability);
+#endif
                 if (more) {
                     k = 2;
                     while (k < depth) {
+#ifdef QLIC_STREAM_TRACE
+                        int unary_index = k;
+                        Prob hierarchy_tail_child = PROB_INIT;
+                        Prob hierarchy_tail_parent = PROB_INIT;
+                        if (hierarchy_gate_trace) {
+                            hierarchy_tail_child = m->unary[ctx][k];
+                            hierarchy_tail_parent =
+                                (Prob)((coarse_full->unary[base_ctx][k] +
+                                        root_full->unary[aq][k] + 1u) >>
+                                       1);
+                        }
+#endif
                         int bit;
                         if (root_ctx)
-                            bit = dec_bit_root(dec, &m->unary[ctx][k],
+                            bit = dec_bit_root(bit_dec, &m->unary[ctx][k],
                                                &coarse_full->unary[base_ctx][k],
                                                &root_full->unary[aq][k],
-                                               slow_unary);
+                                               slow_unary, adapt);
                         else if (full_coarse)
-                            bit = dec_bit_coarse(dec, &m->unary[ctx][k],
-                                                 &coarse_full->unary[base_ctx][k]);
+                            bit = dec_bit_coarse(
+                                bit_dec, &m->unary[ctx][k],
+                                &coarse_full->unary[base_ctx][k], adapt);
                         else
-                            bit = dec_bit(dec, &m->unary[ctx][k]);
+                            bit = dec_bit_rate(bit_dec, &m->unary[ctx][k],
+                                               adapt);
+#ifdef QLIC_STREAM_TRACE
+                        if ((context_cache_trace || calibration_trace) &&
+                            unary_index == 2)
+                            context_magnitude_probability[1] =
+                                bit_dec->trace_probability;
+                        if (hierarchy_gate_trace)
+                            hierarchy_gate_trace_bit(
+                                hierarchy_gate_trace,
+                                HIERARCHY_GATE_MAGNITUDE_TAIL, aq, 0,
+                                hierarchy_tail_child, hierarchy_tail_parent,
+                                128u, bit, bit_dec->trace_probability);
+#endif
                         if (!bit) break;
                         k++;
                     }
@@ -3161,18 +5107,44 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
             unsigned v = 0;
             if (k) {
                 v = 1u << (k - 1);
+#ifdef QLIC_STREAM_TRACE
+                if (qst2_trace) bit_dec->trace_class = DEC_TRACE_TAIL;
+#endif
                 for (int i = k - 2; i >= 0; i--) {
                     int bit;
+#ifdef QLIC_STREAM_TRACE
+                    Prob hierarchy_mantissa_child = PROB_INIT;
+                    Prob hierarchy_mantissa_parent = PROB_INIT;
+                    if (hierarchy_gate_trace) {
+                        hierarchy_mantissa_child =
+                            m->mant[ctx][k - 2][i];
+                        hierarchy_mantissa_parent =
+                            (Prob)((coarse_full->mant[base_ctx][k - 2][i] +
+                                    root_full->mant[aq][k - 2][i] + 1u) >>
+                                   1);
+                    }
+#endif
                     if (root_ctx)
-                        bit = dec_bit_root(dec, &m->mant[ctx][k][i],
-                                           &coarse_full->mant[base_ctx][k][i],
-                                           &root_full->mant[aq][k][i],
-                                           slow_mant);
+                        bit = dec_bit_root(
+                            bit_dec, &m->mant[ctx][k - 2][i],
+                            &coarse_full->mant[base_ctx][k - 2][i],
+                            &root_full->mant[aq][k - 2][i],
+                            slow_mant, adapt);
                     else if (full_coarse)
-                        bit = dec_bit_coarse(dec, &m->mant[ctx][k][i],
-                                             &coarse_full->mant[base_ctx][k][i]);
+                        bit = dec_bit_coarse(
+                            bit_dec, &m->mant[ctx][k - 2][i],
+                            &coarse_full->mant[base_ctx][k - 2][i], adapt);
                     else
-                        bit = dec_bit(dec, &m->mant[ctx][k][i]);
+                        bit = dec_bit_rate(bit_dec,
+                                           &m->mant[ctx][k - 2][i], adapt);
+#ifdef QLIC_STREAM_TRACE
+                    if (hierarchy_gate_trace)
+                        hierarchy_gate_trace_bit(
+                            hierarchy_gate_trace, HIERARCHY_GATE_MANTISSA,
+                            aq, 0, hierarchy_mantissa_child,
+                            hierarchy_mantissa_parent, 128u, bit,
+                            bit_dec->trace_probability);
+#endif
                     v |= (unsigned)bit << i;
                 }
             }
@@ -3193,6 +5165,9 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
                 pr = predicta_impl(pid, Wv, Nv, NWv, NEv, WWv, NNv, maxv);
             int e = 0;
             if (v) {
+#ifdef QLIC_STREAM_TRACE
+                if (qst2_trace) bit_dec->trace_class = DEC_TRACE_SIGN;
+#endif
                 int hint = sign_hint(Wv, Nv, NWv, NEv, WWv, NNv, pr, maxv);
                 Prob *p;
                 Prob *parent = hint ? &m->sg[ctx][hint < 0] : &m->nz[ctx];
@@ -3200,57 +5175,158 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
                     int s = state_in[pi];
                     int cross_base = state_out ? channel_zero_state(s) :
                         zero_pair[s];
-                    int base = cross_base * 5 + local_zero_ctx(prevk, uk, prevs, ups[x]);
+                    int base = cross_base * 5 + local_state;
                     int hc = hint < 0 ? 2 : hint > 0;
                     p = &cross_sign[(size_t)(base + sign_base_states * hc) * context_stride + (size_t)ctx];
                     if (!*p) *p = *parent;
                 } else {
                     p = parent;
                 }
+#ifdef QLIC_STREAM_TRACE
+                Prob hierarchy_sign_child = PROB_INIT;
+                Prob hierarchy_sign_parent = PROB_INIT;
+                unsigned hierarchy_sign_weight = 0;
+                int hierarchy_sign_group =
+                    k <= 1 ? 0 : k <= 3 ? 1 : 2;
+#endif
                 int neg;
                 if (root_ctx) {
                     Prob *cp = hint ? &coarse->sg[base_ctx][hint < 0]
                                     : &coarse->nz[base_ctx];
-                    Prob *rp = hint ? &root->sg[aq][hint < 0] : &root->nz[aq];
+                    Prob *rp = hint ? &root->sg[aq][hint < 0]
+                                    : &root->nz[aq];
                     int kb = exact_sign_k ? (k <= 1 ? 0 : k <= 3 ? 1 : 2) : 0;
                     Prob *ep = hint ? &predictor->sg[pid][base_ctx][kb][hint < 0]
                                     : &predictor->nz[pid][base_ctx][kb];
+#ifdef QLIC_STREAM_TRACE
+                    if (hierarchy_gate_trace) {
+                        if (p != parent) {
+                            hierarchy_sign_child = *p;
+                            hierarchy_sign_parent = *ep;
+                            hierarchy_sign_weight = 192u;
+                        } else {
+                            Prob coarse_mix =
+                                (Prob)((*cp + *rp + 1u) >> 1);
+                            hierarchy_sign_child = *ep;
+                            hierarchy_sign_parent =
+                                (Prob)((*parent + coarse_mix + 1u) >> 1);
+                            hierarchy_sign_weight = 160u;
+                        }
+                    }
+#endif
                     if (p != parent) {
                         if (exact_sign)
-                            neg = dec_bit_mix5_sign(dec, p, ep, parent, cp, rp,
+                            neg = dec_bit_mix5_sign(bit_dec, p, ep, parent, cp, rp,
                                                     slow_sign,
                                                     refined_sign ? sign53_weight[kb] : 12,
                                                     refined_sign ? sign53_child_rate[kb] : 1,
-                                                    refined_sign ? sign53_exact_rate[kb] : 2);
+                                                    refined_sign ? sign53_exact_rate[kb] : 2,
+                                                    adapt);
                         else
-                            neg = dec_bit_mix4(dec, p, parent, cp, rp,
-                                               slow_sign, fast_sign);
+                            neg = dec_bit_mix4(bit_dec, p, parent, cp, rp,
+                                               slow_sign, fast_sign, adapt);
                     }
                     else if (exact_sign) {
                         if (refined_sign) {
-                            neg = dec_bit_mix4_custom(dec, ep, parent, cp, rp,
+                            neg = dec_bit_mix4_custom(bit_dec, ep, parent, cp, rp,
                                                       slow_sign, 5,
-                                                      mode53_root_rate[kb]);
+                                                      mode53_root_rate[kb],
+                                                      adapt);
                         } else
-                            neg = dec_bit_mix4_weight(dec, ep, parent, cp, rp,
-                                                      slow_sign, 5);
+                            neg = dec_bit_mix4_weight(bit_dec, ep, parent, cp, rp,
+                                                      slow_sign, 5, adapt);
                     }
                     else
-                        neg = dec_bit_root(dec, parent, cp, rp, slow_sign);
+                        neg = dec_bit_root(bit_dec, parent, cp, rp, slow_sign,
+                                           adapt);
                 } else if (coarse_ctx) {
                     Prob *cp = hint ? &coarse->sg[base_ctx][hint < 0] : &coarse->nz[base_ctx];
-                    if (p != parent) neg = dec_bit_mix3(dec, p, parent, cp);
-                    else neg = dec_bit_coarse(dec, parent, cp);
+                    if (p != parent)
+                        neg = dec_bit_mix3(bit_dec, p, parent, cp, adapt);
+                    else
+                        neg = dec_bit_coarse(bit_dec, parent, cp, adapt);
                 } else if (mix_ctx && p != parent)
-                    neg = dec_bit_mix(dec, p, parent);
+                    neg = dec_bit_mix(bit_dec, p, parent, adapt);
                 else {
-                    neg = dec_bit(dec, p);
-                    if (p != parent) prob_update(parent, neg, dec->adapt);
+                    neg = dec_bit_rate(bit_dec, p, adapt);
+                    if (p != parent) prob_update(parent, neg, adapt);
                 }
+#ifdef QLIC_STREAM_TRACE
+                if (context_cache_trace || calibration_trace) {
+                    context_sign_probability = bit_dec->trace_probability;
+                    context_coded_sign = neg;
+                }
+                if (hierarchy_gate_trace)
+                    hierarchy_gate_trace_bit(
+                        hierarchy_gate_trace, HIERARCHY_GATE_SIGN, aq,
+                        hierarchy_sign_group, hierarchy_sign_child,
+                        hierarchy_sign_parent, hierarchy_sign_weight, neg,
+                        bit_dec->trace_probability);
+                if (qst2_trace) {
+                    qst2_sign[aq][neg != 0]++;
+                    if (qst2_context_trace) {
+                        int k_class = k <= 1 ? 0 : k <= 3 ? 1 : 2;
+                        int hint_class = hint < 0 ? 2 : hint > 0 ? 1 : 0;
+                        size_t sign_context =
+                            ((size_t)qst2_static_context *
+                                 QST2_SIGN_CLASSES +
+                             (size_t)(k_class * 3 + hint_class)) *
+                            2u;
+                        qst2_sign_context[sign_context + (neg != 0)]++;
+                    }
+                }
+#endif
                 if (cs) neg ^= cs < 0;
                 neg ^= hint < 0;
                 e = neg ? -(int)v : (int)v;
             }
+#ifdef QLIC_STREAM_TRACE
+            if (qst2_trace) {
+                qst2_magnitude[aq][v]++;
+                if (qst2_context_trace)
+                    qst2_k_context[
+                        (size_t)qst2_static_context * QST2_K_SYMBOLS +
+                        (size_t)k]++;
+                if (qst2_context_trace && k)
+                    qst2_length_context[
+                        (size_t)qst2_length_static_context *
+                        QST2_LENGTH_SYMBOLS +
+                        (size_t)(k - 1)]++;
+                if (qst2_context_trace && k > 1) {
+                    for (int bit_position = 0; bit_position < k - 1;
+                         ++bit_position) {
+                        int bit = (int)((v >> bit_position) & 1u);
+                        size_t mantissa_context =
+                            ((size_t)qst2_base_static_context *
+                                 QST2_MANTISSA_SLOTS +
+                             (size_t)(k * 8 + bit_position)) *
+                            2u;
+                        qst2_mantissa_context[
+                            mantissa_context + (size_t)bit]++;
+                    }
+                }
+            }
+            if (gradient_topology_trace)
+                gradient_topology_trace_residual(
+                    gradient_topology_trace, gradient_zero_context,
+                    gradient_magnitude_context, gradient_signature, k,
+                    aq, gradient_predictor_family, adapt,
+                    context_zero_probability,
+                    context_magnitude_probability[0]);
+            if (context_cache_trace)
+                context_cache_trace_residual(
+                    context_cache_trace, context_cache_key, aq, adapt, k,
+                    context_coded_sign, context_zero_probability,
+                    context_magnitude_probability, context_sign_probability);
+            if (calibration_trace) {
+                int cross_state = state_in ? state_in[pi] : 0;
+                calibration_trace_residual(
+                    calibration_trace, y, pid, aq, prevk, prevs, uk, us,
+                    cross_state, k, context_coded_sign,
+                    context_zero_probability, context_magnitude_probability,
+                    context_sign_probability);
+            }
+#endif
             row[x] = (uint16_t)((pr + e) & maxv);
             if (weighted_mode)
                 weighted_predictor_update(&weighted, x, y, row[x]);
@@ -3272,6 +5348,196 @@ static QLIC_FORCEINLINE int decode_plane37_impl(
             prev_us = us;
         }
     }
+    *dec = local_dec;
+#ifdef QLIC_STREAM_TRACE
+    if (predictor_oracle_enabled)
+        predictor_oracle_trace(
+            pl, w, h, depth, tlog, tp, ntx, plane_role);
+    if (gradient_topology_trace) {
+        gradient_topology_trace_print(
+            gradient_topology_trace,
+            (size_t)(dec->ptr - gradient_topology_range_begin));
+        gradient_topology_trace_free(gradient_topology_trace);
+    }
+    if (context_cache_trace) {
+        context_cache_trace_print(
+            context_cache_trace,
+            (size_t)(dec->ptr - context_cache_range_begin));
+        context_cache_trace_free(context_cache_trace);
+    }
+    if (calibration_trace) {
+        calibration_trace_print(
+            calibration_trace,
+            (size_t)(dec->ptr - calibration_range_begin));
+        calibration_trace_free(calibration_trace);
+    }
+    if (hierarchy_gate_trace) {
+        hierarchy_gate_trace_print(
+            hierarchy_gate_trace,
+            (size_t)(dec->ptr - hierarchy_gate_range_begin));
+        free(hierarchy_gate_trace);
+    }
+    if (qst2_trace) {
+        fprintf(stderr,
+                "qst2-plane plane=%d pixels=%zu depth=%d tile=%d "
+                "range-bytes=%zu map-bytes=%zu\n",
+                plane_role, (size_t)w * h, depth, tlog,
+                (size_t)(dec->ptr - qst2_range_begin), qst2_map_bytes);
+        fprintf(stderr,
+                "qst2-cost plane=%d "
+                "map-decisions=%llu map-renormalizations=%llu "
+                "zero-decisions=%llu zero-renormalizations=%llu "
+                "magnitude-decisions=%llu magnitude-renormalizations=%llu "
+                "tail-decisions=%llu tail-renormalizations=%llu "
+                "sign-decisions=%llu sign-renormalizations=%llu\n",
+                plane_role,
+                (unsigned long long)(
+                    dec->trace_decisions[DEC_TRACE_MAP] -
+                    qst2_decision_begin[DEC_TRACE_MAP]),
+                (unsigned long long)(
+                    dec->trace_renormalizations[DEC_TRACE_MAP] -
+                    qst2_renormalization_begin[DEC_TRACE_MAP]),
+                (unsigned long long)(
+                    dec->trace_decisions[DEC_TRACE_ZERO] -
+                    qst2_decision_begin[DEC_TRACE_ZERO]),
+                (unsigned long long)(
+                    dec->trace_renormalizations[DEC_TRACE_ZERO] -
+                    qst2_renormalization_begin[DEC_TRACE_ZERO]),
+                (unsigned long long)(
+                    dec->trace_decisions[DEC_TRACE_MAGNITUDE] -
+                    qst2_decision_begin[DEC_TRACE_MAGNITUDE]),
+                (unsigned long long)(
+                    dec->trace_renormalizations[DEC_TRACE_MAGNITUDE] -
+                    qst2_renormalization_begin[DEC_TRACE_MAGNITUDE]),
+                (unsigned long long)(
+                    dec->trace_decisions[DEC_TRACE_TAIL] -
+                    qst2_decision_begin[DEC_TRACE_TAIL]),
+                (unsigned long long)(
+                    dec->trace_renormalizations[DEC_TRACE_TAIL] -
+                    qst2_renormalization_begin[DEC_TRACE_TAIL]),
+                (unsigned long long)(
+                    dec->trace_decisions[DEC_TRACE_SIGN] -
+                    qst2_decision_begin[DEC_TRACE_SIGN]),
+                (unsigned long long)(
+                    dec->trace_renormalizations[DEC_TRACE_SIGN] -
+                    qst2_renormalization_begin[DEC_TRACE_SIGN]));
+        if (qst2_hist_trace) {
+            for (int activity = 0; activity < NACT; ++activity) {
+                fprintf(stderr,
+                        "qst2-hist plane=%d activity=%d sign0=%llu "
+                        "sign1=%llu counts=",
+                        plane_role, activity,
+                        (unsigned long long)qst2_sign[activity][0],
+                        (unsigned long long)qst2_sign[activity][1]);
+                for (int magnitude = 0; magnitude <= 256; ++magnitude) {
+                    if (magnitude) fputc(',', stderr);
+                    fprintf(stderr, "%llu",
+                            (unsigned long long)
+                                qst2_magnitude[activity][magnitude]);
+                }
+                fputc('\n', stderr);
+            }
+        }
+        if (qst2_context_trace) {
+            for (int context = 0; context < QST2_STATIC_CONTEXTS; ++context) {
+                const uint64_t *counts =
+                    qst2_k_context + (size_t)context * QST2_K_SYMBOLS;
+                uint64_t total = 0;
+                for (int k = 0; k < QST2_K_SYMBOLS; ++k)
+                    total += counts[k];
+                if (total) {
+                    int local_class = context % QST2_LOCAL_CLASSES;
+                    int quotient = context / QST2_LOCAL_CLASSES;
+                    int cross_class = quotient % QST2_CROSS_CLASSES;
+                    quotient /= QST2_CROSS_CLASSES;
+                    int previous = quotient % QST2_PREVIOUS_CLASSES;
+                    quotient /= QST2_PREVIOUS_CLASSES;
+                    int family = quotient % 4;
+                    int activity = quotient / 4;
+                    fprintf(stderr,
+                            "qst2-kctx plane=%d context=%d activity=%d "
+                            "family=%d previous=%d cross=%d local=%d counts=",
+                            plane_role, context, activity, family, previous,
+                            cross_class, local_class);
+                    for (int k = 0; k < QST2_K_SYMBOLS; ++k) {
+                        if (k) fputc(',', stderr);
+                        fprintf(stderr, "%llu",
+                                (unsigned long long)counts[k]);
+                    }
+                    fputc('\n', stderr);
+                }
+                for (int sign_class = 0;
+                     sign_class < QST2_SIGN_CLASSES; ++sign_class) {
+                    const uint64_t *signs =
+                        qst2_sign_context +
+                        ((size_t)context * QST2_SIGN_CLASSES +
+                         (size_t)sign_class) *
+                            2u;
+                    if (signs[0] || signs[1])
+                        fprintf(stderr,
+                                "qst2-signctx plane=%d context=%d "
+                                "kclass=%d hint=%d sign0=%llu sign1=%llu\n",
+                                plane_role, context, sign_class / 3,
+                                sign_class % 3,
+                                (unsigned long long)signs[0],
+                                (unsigned long long)signs[1]);
+                }
+            }
+            for (int context = 0; context < QST2_LENGTH_CONTEXTS; ++context) {
+                const uint64_t *counts =
+                    qst2_length_context +
+                    (size_t)context * QST2_LENGTH_SYMBOLS;
+                uint64_t total = 0;
+                for (int length = 0; length < QST2_LENGTH_SYMBOLS; ++length)
+                    total += counts[length];
+                if (total) {
+                    int cross_class = context % QST2_MAGNITUDE_CLASSES;
+                    int quotient = context / QST2_MAGNITUDE_CLASSES;
+                    int previous = quotient % QST2_PREVIOUS_CLASSES;
+                    quotient /= QST2_PREVIOUS_CLASSES;
+                    int family = quotient % 4;
+                    int activity = quotient / 4;
+                    fprintf(stderr,
+                            "qst2-lenctx plane=%d context=%d activity=%d "
+                            "family=%d previous=%d cross=%d counts=",
+                            plane_role, context, activity, family, previous,
+                            cross_class);
+                    for (int length = 0; length < QST2_LENGTH_SYMBOLS;
+                         ++length) {
+                        if (length) fputc(',', stderr);
+                        fprintf(stderr, "%llu",
+                                (unsigned long long)counts[length]);
+                    }
+                    fputc('\n', stderr);
+                }
+            }
+            for (int base = 0; base < QST2_BASE_CONTEXTS; ++base) {
+                for (int k = 2; k <= 9; ++k) {
+                    for (int bit_position = 0; bit_position < k - 1;
+                         ++bit_position) {
+                        const uint64_t *bits =
+                            qst2_mantissa_context +
+                            ((size_t)base * QST2_MANTISSA_SLOTS +
+                             (size_t)(k * 8 + bit_position)) *
+                                2u;
+                        if (bits[0] || bits[1])
+                            fprintf(stderr,
+                                    "qst2-mantctx plane=%d context=%d k=%d "
+                                    "bit=%d bit0=%llu bit1=%llu\n",
+                                    plane_role, base, k, bit_position,
+                                    (unsigned long long)bits[0],
+                                    (unsigned long long)bits[1]);
+                    }
+                }
+            }
+        }
+    }
+    free(qst2_magnitude);
+    free(qst2_k_context);
+    free(qst2_length_context);
+    free(qst2_mantissa_context);
+    free(qst2_sign_context);
+#endif
     weighted_predictor_free(&weighted);
     free(models);
     return STREAM_OK;
@@ -3281,31 +5547,81 @@ static QLIC_NOINLINE int decode_plane37(
     Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog,
     int cmap, int context_mode, uint8_t *state_out, const uint8_t *state_in) {
     return decode_plane37_impl(dec, pl, w, h, depth, tlog, cmap, context_mode,
-                               state_out, state_in);
+                               state_out, state_in, dec->adapt);
+}
+
+static QLIC_NOINLINE int decode_plane52_independent(
+    Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog) {
+#if defined(__clang__) && defined(_M_X64)
+    if (dec->adapt == ADAPT_DEFAULT)
+        return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 9, NULL,
+                                   NULL, ADAPT_DEFAULT);
+#endif
+    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 9, NULL, NULL,
+                               dec->adapt);
+}
+
+static QLIC_NOINLINE int decode_plane52_first(
+    Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog,
+    uint8_t *state) {
+#if defined(__clang__) && defined(_M_X64)
+    if (dec->adapt == ADAPT_DEFAULT)
+        return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 9, state,
+                                   NULL, ADAPT_DEFAULT);
+#endif
+    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 9, state, NULL,
+                               dec->adapt);
+}
+
+static QLIC_NOINLINE int decode_plane52_middle(
+    Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog,
+    uint8_t *state) {
+#if defined(__clang__) && defined(_M_X64)
+    if (dec->adapt == ADAPT_DEFAULT)
+        return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 9, state,
+                                   state, ADAPT_DEFAULT);
+#endif
+    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 9, state,
+                               state, dec->adapt);
+}
+
+static QLIC_NOINLINE int decode_plane52_last(
+    Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog,
+    const uint8_t *state) {
+#if defined(__clang__) && defined(_M_X64)
+    if (dec->adapt == ADAPT_DEFAULT)
+        return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 9, NULL,
+                                   state, ADAPT_DEFAULT);
+#endif
+    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 9, NULL, state,
+                               dec->adapt);
 }
 
 static QLIC_NOINLINE int decode_plane53_independent(
     Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog) {
-    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 10, NULL, NULL);
+    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 10, NULL, NULL,
+                               dec->adapt);
 }
 
 static QLIC_NOINLINE int decode_plane53_first(
     Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog,
     uint8_t *state) {
-    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 10, state, NULL);
+    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 10, state,
+                               NULL, dec->adapt);
 }
 
 static QLIC_NOINLINE int decode_plane53_middle(
     Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog,
     uint8_t *state) {
     return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 10, state,
-                               state);
+                               state, dec->adapt);
 }
 
 static QLIC_NOINLINE int decode_plane53_last(
     Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int tlog,
     const uint8_t *state) {
-    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 10, NULL, state);
+    return decode_plane37_impl(dec, pl, w, h, depth, tlog, 1, 10, NULL, state,
+                               dec->adapt);
 }
 
 static int decode_plane_rule(Dec *dec, uint16_t *pl, uint32_t w, uint32_t h, int depth, int pos) {
@@ -3771,6 +6087,39 @@ static QLIC_FORCEINLINE int rg_luma_blend(int r, int g, int t) {
 static int rg_luma_lift(int u, int v) {
     return floor_shift(u + v, 2);
 }
+static QLIC_FORCEINLINE int normal_map_blue_predictor(int r, int g) {
+    int x = r - 128;
+    int y = g - 128;
+    int q = 255 - ((x * x + y * y + 127) >> 8);
+    return q < 128 ? 128 : q;
+}
+/* A 64-byte correction table keeps the decoder integer-only while following
+   sqrt(127^2-x^2-y^2) more closely than the quadratic tangent in transform
+   38.  The radius check also keeps the table index bounded. */
+static QLIC_FORCEINLINE int normal_map_sphere_predictor(int r, int g) {
+    static const uint8_t correction[64] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1,
+        1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5,
+        6, 6, 7, 7, 8, 8, 9, 9, 10, 11, 12, 12, 13, 14, 15, 16,
+        17, 18, 19, 21, 22, 24, 25, 27, 29, 31, 34, 37, 41, 45, 53, 63
+    };
+    int x = r - 128;
+    int y = g - 128;
+    unsigned radius2 = (unsigned)(x * x + y * y);
+    if (radius2 >= 16129u) return 128;
+    return 255 - (int)((radius2 + 127u) >> 8) -
+           correction[radius2 >> 8];
+}
+
+static QLIC_FORCEINLINE int normal_map_sphere_transform(int transform) {
+    return transform == 39 || transform == 40;
+}
+
+static QLIC_FORCEINLINE int transform_plane_depth(int transform, int plane) {
+    if (plane == 0 || transform == 0) return 8;
+    if (transform == 40 && plane == 1) return 8;
+    return 9;
+}
 static void fwd_transform(const uint8_t *pix, size_t npix, int stride, int t, uint16_t *P[3]) {
     size_t s = (size_t)stride;
     for (size_t i = 0; i < npix; i++) {
@@ -3807,10 +6156,27 @@ static void fwd_transform(const uint8_t *pix, size_t npix, int stride, int t, ui
             P[0][i] = (uint16_t)(G + rg_luma_lift(u, v));
             P[1][i] = (uint16_t)(u + 256);
             P[2][i] = (uint16_t)(B - rg_luma_blend(R, G, t) + 256);
-        } else {
+        } else if (t == 35) {
             P[0][i] = (uint16_t)R;
             P[1][i] = (uint16_t)(G - R + 256);
             P[2][i] = (uint16_t)(B - floor_shift(G + R, 1) + 256);
+        } else if (t == 36) {
+            P[0][i] = (uint16_t)B;
+            P[1][i] = (uint16_t)(R - B + 256);
+            P[2][i] =
+                (uint16_t)(G - floor_shift(40 * R + 24 * B, 6) + 256);
+        } else if (t == 37) {
+            P[0][i] = (uint16_t)B;
+            P[1][i] = (uint16_t)(G - B + 256);
+            P[2][i] =
+                (uint16_t)(R - floor_shift(40 * G + 24 * B, 6) + 256);
+        } else {
+            int predictor = normal_map_sphere_transform(t)
+                                ? normal_map_sphere_predictor(R, G)
+                                : normal_map_blue_predictor(R, G);
+            P[0][i] = (uint16_t)R;
+            P[1][i] = (uint16_t)(t == 40 ? G : G + 128);
+            P[2][i] = (uint16_t)(B - predictor + 256);
         }
     }
 }
@@ -3848,10 +6214,25 @@ static QLIC_FORCEINLINE void inv_transform_pixel(
         *G = (int)P[0][i] - rg_luma_lift(u, v);
         *R = *G + u;
         *B = *G + v;
-    } else {
+    } else if (t == 35) {
         *R = P[0][i];
         *G = (int)P[1][i] - 256 + *R;
         *B = (int)P[2][i] - 256 + floor_shift(*G + *R, 1);
+    } else if (t == 36) {
+        *B = P[0][i];
+        *R = (int)P[1][i] - 256 + *B;
+        *G = (int)P[2][i] - 256 + floor_shift(40 * *R + 24 * *B, 6);
+    } else if (t == 37) {
+        *B = P[0][i];
+        *G = (int)P[1][i] - 256 + *B;
+        *R = (int)P[2][i] - 256 + floor_shift(40 * *G + 24 * *B, 6);
+    } else {
+        *R = P[0][i];
+        *G = (int)P[1][i] - (t == 40 ? 0 : 128);
+        int predictor = normal_map_sphere_transform(t)
+                            ? normal_map_sphere_predictor(*R, *G)
+                            : normal_map_blue_predictor(*R, *G);
+        *B = (int)P[2][i] - 256 + predictor;
     }
 }
 
@@ -3935,7 +6316,7 @@ typedef struct {
 } GrayMapCache;
 
 typedef struct {
-    uint16_t *planes[36];
+    uint16_t *planes[QLIC_TRANSFORM_COUNT];
 } TransformPlaneCache;
 
 typedef struct {
@@ -3953,7 +6334,40 @@ typedef struct {
     uint64_t map37_pair_mask;
     uint64_t zero_run_known_mask;
     uint64_t zero_run_value_mask;
+    uint16_t zero_run_per_mille[QLIC_TRANSFORM_COUNT];
+#ifdef QLIC_STREAM_TRACE
+    uint16_t small1_per_mille[QLIC_TRANSFORM_COUNT];
+    int trace;
+#endif
 } EncCtx;
+
+#ifdef QLIC_STREAM_TRACE
+static double stream_trace_now(void) {
+#ifdef _WIN32
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)frequency.QuadPart;
+#else
+    struct timespec value;
+    timespec_get(&value, TIME_UTC);
+    return (double)value.tv_sec + (double)value.tv_nsec * 1e-9;
+#endif
+}
+
+static void stream_trace_trial(const EncCtx *c, const char *kind, int mode,
+                               int transform, int tlog, int adapt,
+                               size_t limit, size_t bytes, int error, int won,
+                               double seconds) {
+    if (!c->trace) return;
+    fprintf(stderr,
+            "stream-%s mode=%d transform=%d tile=%d adapt=%d limit=%zu "
+            "bytes=%zu err=%d won=%d seconds=%.9f\n",
+            kind, mode, transform, tlog, adapt, limit, bytes, error, won,
+            seconds);
+}
+#endif
 
 static int cached_transform_planes(const EncCtx *c, int transform,
                                    uint16_t **planes) {
@@ -3977,7 +6391,7 @@ static int cached_transform_planes(const EncCtx *c, int transform,
 }
 
 static void free_transform_plane_cache(TransformPlaneCache *cache) {
-    for (int i = 0; i < 36; ++i) free(cache->planes[i]);
+    for (int i = 0; i < QLIC_TRANSFORM_COUNT; ++i) free(cache->planes[i]);
 }
 
 static int cached_map37(const EncCtx *c, int transform, int tlog, int plane,
@@ -4355,7 +6769,9 @@ static int split37_stream_encode(const EncCtx *c, int t, int tlog, size_t limit,
             return STREAM_E_ALLOC;
         }
         uint16_t *pls[3] = {P, Q, R};
-        int depth[3] = {8, t ? 9 : 8, t ? 9 : 8};
+        int depth[3] = {transform_plane_depth(t, 0),
+                        transform_plane_depth(t, 1),
+                        transform_plane_depth(t, 2)};
         if (!planes_cached)
             fwd_transform(c->pix, npix, (int)c->stride, t, pls);
         for (int p = 0; p < 3 && err == STREAM_OK; p++) {
@@ -4484,7 +6900,9 @@ static void split37_dec_band(SplitBandTask *b) {
         return;
     }
     uint16_t *pl[3] = {buf, buf + npix, buf + npix * 2u};
-    int depth[3] = {8, b->t ? 9 : 8, b->t ? 9 : 8};
+    int depth[3] = {transform_plane_depth(b->t, 0),
+                    transform_plane_depth(b->t, 1),
+                    transform_plane_depth(b->t, 2)};
     b->err = STREAM_OK;
     for (int p = 0; p < 3 && b->err == STREAM_OK; p++) {
         SplitDecTask t;
@@ -4624,7 +7042,9 @@ static int split37_stream_decode(const uint8_t *payload, size_t plen, uint32_t w
             return STREAM_E_ALLOC;
         }
         uint16_t *pls[3] = {P, Q, R};
-        int depth[3] = {8, t ? 9 : 8, t ? 9 : 8};
+        int depth[3] = {transform_plane_depth(t, 0),
+                        transform_plane_depth(t, 1),
+                        transform_plane_depth(t, 2)};
         for (int i = 0; i < 3; i++) {
             for (uint32_t by = 0; by < bands; by++) {
                 uint32_t y0 = by * SPLIT_BAND_H;
@@ -4652,7 +7072,9 @@ static int split37_stream_decode(const uint8_t *payload, size_t plen, uint32_t w
             return STREAM_E_ALLOC;
         }
         uint16_t *pls[3] = {P, Q, R};
-        int depth[3] = {8, t ? 9 : 8, t ? 9 : 8};
+        int depth[3] = {transform_plane_depth(t, 0),
+                        transform_plane_depth(t, 1),
+                        transform_plane_depth(t, 2)};
         for (int i = 0; i < 3; i++) {
             for (uint32_t by = 0; by < bands; by++) {
                 uint32_t y0 = by * SPLIT_BAND_H;
@@ -4759,22 +7181,41 @@ static void transform_px(const uint8_t *p, int t, int v[3]) {
         v[0] = G + rg_luma_lift(u, b);
         v[1] = u + 256;
         v[2] = B - rg_luma_blend(R, G, t) + 256;
-    } else {
+    } else if (t == 35) {
         v[0] = R;
         v[1] = G - R + 256;
         v[2] = B - floor_shift(G + R, 1) + 256;
+    } else if (t == 36) {
+        v[0] = B;
+        v[1] = R - B + 256;
+        v[2] = G - floor_shift(40 * R + 24 * B, 6) + 256;
+    } else if (t == 37) {
+        v[0] = B;
+        v[1] = G - B + 256;
+        v[2] = R - floor_shift(40 * G + 24 * B, 6) + 256;
+    } else {
+        int predictor = normal_map_sphere_transform(t)
+                            ? normal_map_sphere_predictor(R, G)
+                            : normal_map_blue_predictor(R, G);
+        v[0] = R;
+        v[1] = t == 40 ? G : G + 128;
+        v[2] = B - predictor + 256;
     }
 }
 
-static int zero_run_candidate_for(EncCtx *c, int t) {
+static void sample_zero_run_for(EncCtx *c, int t) {
     uint64_t bit = UINT64_C(1) << t;
-    if (c->zero_run_known_mask & bit)
-        return (c->zero_run_value_mask & bit) != 0;
+    if (c->zero_run_known_mask & bit) return;
     uint32_t xs = c->w > 512u ? (c->w + 511u) / 512u : 1u;
     uint32_t ys = c->h > 128u ? (c->h + 127u) / 128u : 1u;
     uint64_t zero = 0, total = 0;
+#ifdef QLIC_STREAM_TRACE
+    uint64_t small1 = 0;
+#endif
     int stride = (int)c->stride;
-    int depth[3] = {8, t ? 9 : 8, t ? 9 : 8};
+    int depth[3] = {transform_plane_depth(t, 0),
+                    transform_plane_depth(t, 1),
+                    transform_plane_depth(t, 2)};
     for (uint32_t y = 0; y < c->h; y += ys) {
         for (uint32_t x = 0; x < c->w; x += xs) {
             int C[3], W[3], N[3], NW[3], NE[3];
@@ -4798,6 +7239,9 @@ static int zero_run_candidate_for(EncCtx *c, int t) {
                 int pr = predict(0, wv, nv, nwv, nev, maxv);
                 int e = ((C[k] - pr + half) & maxv) - half;
                 zero += e == 0;
+#ifdef QLIC_STREAM_TRACE
+                small1 += e >= -1 && e <= 1;
+#endif
                 total++;
             }
         }
@@ -4805,7 +7249,25 @@ static int zero_run_candidate_for(EncCtx *c, int t) {
     int result = total && zero * 4u >= total;
     c->zero_run_known_mask |= bit;
     if (result) c->zero_run_value_mask |= bit;
-    return result;
+    if (total)
+        c->zero_run_per_mille[t] =
+            (uint16_t)((zero * 1000u + total / 2u) / total);
+#ifdef QLIC_STREAM_TRACE
+    if (total)
+        c->small1_per_mille[t] =
+            (uint16_t)((small1 * 1000u + total / 2u) / total);
+#endif
+}
+
+static unsigned sampled_zero_per_mille_for(EncCtx *c, int t) {
+    sample_zero_run_for(c, t);
+    return c->zero_run_per_mille[t];
+}
+
+static int zero_run_candidate_for(EncCtx *c, int t) {
+    uint64_t bit = UINT64_C(1) << t;
+    sample_zero_run_for(c, t);
+    return (c->zero_run_value_mask & bit) != 0;
 }
 
 static int gray_unique_count(const EncCtx *c, int limit) {
@@ -4824,23 +7286,41 @@ static int gray_unique_count(const EncCtx *c, int limit) {
     return count;
 }
 
-static const uint8_t scored_transforms[36] = {
+static const uint8_t scored_transforms[QLIC_TRANSFORM_COUNT] = {
     2, 9, 10, 5, 6, 3, 1, 7, 8, 0, 4,
     11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-    25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35
+    25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37
+    , 38, 39
+    , 40
 };
-static void ranked_transform_scores(const EncCtx *c, uint64_t cost[36],
-                                    int include_reversible);
+enum {
+    FAST_SPECIALIST_MIN_GAIN_PER_MILLE = 9,
+    SYMMETRIC_TRANSFORM_MIN_GAIN_PER_MILLE = 7,
+    NORMAL_MAP_TRANSFORM_MIN_GAIN_PER_MILLE = 10,
+    SPHERE_NORMAL_MIN_GAIN_PER_10000 = 75
+};
+static void ranked_transform_scores(
+    const EncCtx *c, uint64_t cost[QLIC_TRANSFORM_COUNT],
+    int include_reversible);
+#ifdef QLIC_STREAM_TRACE
+static void symmetric_transform_scores(const EncCtx *c, uint64_t cost[5][18]);
+#endif
 
 static int fast_transform_for(const EncCtx *c, int *ordinary_out,
-                              int *alternate_out, int *alternate_close,
-                              int *dense_out) {
+                               int *alternate_out, int *alternate_close,
+                               int *specialist_decisive, int *dense_out,
+                               uint64_t *score_out, uint64_t *samples_out,
+                               int *normal_map_candidate,
+                               uint64_t *normal_map_score,
+                               int *sphere_map_candidate,
+                               uint64_t *sphere_map_score,
+                               int *compact_sphere_candidate,
+                               uint64_t *compact_sphere_score) {
     uint64_t cost2 = 0, best_cost = UINT64_MAX;
-    uint64_t cost[36];
+    uint64_t cost[QLIC_TRANSFORM_COUNT];
     int best = 2;
     ranked_transform_scores(c, cost, 1);
-    for (size_t i = 0;
-         i < sizeof(scored_transforms) / sizeof(scored_transforms[0]); i++) {
+    for (size_t i = 0; i < 38u; i++) {
         int transform = scored_transforms[i];
         uint64_t score = cost[transform];
         if (transform == 2) cost2 = score;
@@ -4849,34 +7329,173 @@ static int fast_transform_for(const EncCtx *c, int *ordinary_out,
             best = transform;
         }
     }
+    if (best >= 36) {
+        int legacy_best = scored_transforms[0];
+        for (int i = 1; i < 36; ++i)
+            if (cost[scored_transforms[i]] < cost[legacy_best])
+                legacy_best = scored_transforms[i];
+        uint64_t exact_gain = cost[legacy_best] - best_cost;
+        uint64_t minimum_gain =
+            (cost[legacy_best] * SYMMETRIC_TRANSFORM_MIN_GAIN_PER_MILLE +
+             999u) /
+            1000u;
+#ifdef QLIC_STREAM_TRACE
+        {
+            const char *selection_trace =
+                getenv("QLIC_TRACE_SYMMETRIC_SELECTION");
+            if (selection_trace && selection_trace[0] &&
+                selection_trace[0] != '0')
+                fprintf(stderr,
+                        "transform-symmetric-selection legacy=%d "
+                        "legacy_cost=%llu candidate=%d candidate_cost=%llu "
+                        "gain_ppm=%llu accepted=%d\n",
+                        legacy_best, (unsigned long long)cost[legacy_best],
+                        best, (unsigned long long)best_cost,
+                        (unsigned long long)(exact_gain * 1000000u /
+                                             cost[legacy_best]),
+                        exact_gain >= minimum_gain);
+        }
+#endif
+        if (exact_gain < minimum_gain) {
+            best = legacy_best;
+            best_cost = cost[best];
+        }
+    }
+    if (normal_map_candidate) {
+        uint64_t minimum_gain =
+            (best_cost * NORMAL_MAP_TRANSFORM_MIN_GAIN_PER_MILLE + 999u) /
+            1000u;
+        *normal_map_candidate =
+            cost[38] < best_cost && best_cost - cost[38] >= minimum_gain;
+    }
+    if (normal_map_score) *normal_map_score = cost[38];
+    uint64_t current = cost[38] < best_cost ? cost[38] : best_cost;
+    uint64_t minimum_sphere_gain =
+        (current * SPHERE_NORMAL_MIN_GAIN_PER_10000 + 9999u) / 10000u;
+    int sphere_selected =
+        cost[39] < current && current - cost[39] >= minimum_sphere_gain;
+    if (sphere_map_candidate) *sphere_map_candidate = sphere_selected;
+    if (sphere_map_score) *sphere_map_score = cost[39];
+    /* Transform 40 removes the unnecessary ninth bit from transform 39's
+       green plane.  It is a fallback, not a second retry beside an already
+       decisive transform-39 candidate; completed bytes remain authoritative. */
+    if (compact_sphere_candidate)
+        *compact_sphere_candidate = !sphere_selected && cost[40] < current;
+    if (compact_sphere_score) *compact_sphere_score = cost[40];
+#ifdef QLIC_STREAM_TRACE
+    {
+        const char *trace_value = getenv("QLIC_TRACE_SYMMETRIC_TRANSFORMS");
+        if (trace_value && trace_value[0] && trace_value[0] != '0') {
+            uint64_t symmetric[5][18];
+            uint64_t symmetric_best = UINT64_MAX;
+            int symmetric_family = 0;
+            int symmetric_weight = 0;
+            symmetric_transform_scores(c, symmetric);
+            for (int family = 0; family < 5; ++family) {
+                for (int weight = 0; weight < 18; ++weight) {
+                    if (symmetric[family][weight] < symmetric_best) {
+                        symmetric_best = symmetric[family][weight];
+                        symmetric_family = family;
+                        symmetric_weight = weight;
+                    }
+                }
+            }
+            uint64_t gain = symmetric_best < best_cost
+                                ? best_cost - symmetric_best
+                                : 0;
+            uint64_t gain_per_million =
+                best_cost ? gain * 1000000u / best_cost : 0;
+            fprintf(stderr,
+                    "transform-symmetric current=%d current_cost=%llu "
+                    "family=%d weight_index=%d candidate_cost=%llu "
+                    "gain_ppm=%llu\n",
+                    best, (unsigned long long)best_cost, symmetric_family,
+                    symmetric_weight, (unsigned long long)symmetric_best,
+                    (unsigned long long)gain_per_million);
+        }
+    }
+#endif
     int ordinary = scored_transforms[0];
     for (int i = 1; i < 11; ++i)
         if (cost[scored_transforms[i]] < cost[ordinary])
             ordinary = scored_transforms[i];
     int reversible = scored_transforms[11];
-    for (int i = 12; i < 36; ++i)
+    for (int i = 12; i < 38; ++i)
         if (cost[scored_transforms[i]] < cost[reversible])
             reversible = scored_transforms[i];
+    if (reversible >= 36) {
+        int legacy_reversible = scored_transforms[11];
+        for (int i = 12; i < 36; ++i)
+            if (cost[scored_transforms[i]] < cost[legacy_reversible])
+                legacy_reversible = scored_transforms[i];
+        uint64_t minimum_gain =
+            (cost[legacy_reversible] *
+                 SYMMETRIC_TRANSFORM_MIN_GAIN_PER_MILLE +
+             999u) /
+            1000u;
+        if (cost[legacy_reversible] - cost[reversible] < minimum_gain)
+            reversible = legacy_reversible;
+    }
     if (ordinary_out) *ordinary_out = ordinary;
     if (best != 2 && cost2 && best_cost * 200u >= cost2 * 199u) best = 2;
+    if (specialist_decisive) {
+        uint64_t minimum_gain =
+            (cost[ordinary] * FAST_SPECIALIST_MIN_GAIN_PER_MILLE + 999u) /
+            1000u;
+        *specialist_decisive =
+            best > 10 && cost[ordinary] - cost[best] >= minimum_gain;
+    }
+#ifdef QLIC_STREAM_TRACE
+    if (c->trace)
+        fprintf(stderr,
+                "transform-rank best=%d best_cost=%llu ordinary=%d "
+                "ordinary_cost=%llu reversible=%d reversible_cost=%llu\n",
+                best, (unsigned long long)cost[best], ordinary,
+                (unsigned long long)cost[ordinary], reversible,
+                (unsigned long long)cost[reversible]);
+#endif
     int alternate = best <= 10 ? reversible : ordinary;
     if (alternate_out) *alternate_out = alternate;
     if (alternate_close)
         *alternate_close =
             cost[alternate] <= cost[best] + cost[best] / 10u;
-    if (dense_out) {
-        uint32_t xs = c->w > 192u ? (c->w + 191u) / 192u : 1u;
-        uint32_t ys = c->h > 128u ? (c->h + 127u) / 128u : 1u;
-        uint64_t samples =
-            (uint64_t)((c->w + xs - 1u) / xs) *
-            ((c->h + ys - 1u) / ys);
-        *dense_out = best_cost >= samples * 6u;
-    }
+    uint32_t xs = c->w > 192u ? (c->w + 191u) / 192u : 1u;
+    uint32_t ys = c->h > 128u ? (c->h + 127u) / 128u : 1u;
+    uint64_t samples =
+        (uint64_t)((c->w + xs - 1u) / xs) *
+        ((c->h + ys - 1u) / ys);
+    if (dense_out) *dense_out = best_cost >= samples * 6u;
+    if (score_out) *score_out = best_cost;
+    if (samples_out) *samples_out = samples;
     return best;
 }
 
+static int sampled_adaptation_for(EncCtx *c, size_t npix, int transform,
+                                  uint64_t score, uint64_t samples) {
+    if (!samples) return ADAPT_DEFAULT;
+    /* Reuse the transform sample: low residuals settle faster, while only
+       decisively dense large RGB streams benefit from slower adaptation. */
+    if (c->ch == 4 && !c->const_alpha &&
+        score * 2u <= samples * 11u)
+        return ADAPT_FAST;
+    if (c->ch == 3 && npix <= 1000000u && score * 2u <= samples * 9u)
+        return ADAPT_FAST;
+    if (c->ch == 3 && npix >= 1200000u && score >= samples * 14u)
+        return ADAPT_SLOW;
+    unsigned zero_per_mille = sampled_zero_per_mille_for(c, transform);
+    /* Preserve the faster tiny zero-heavy refinement route below this band. */
+    if (zero_per_mille >=
+        (npix > 8192u && npix <= 1000000u ? 800u : 820u))
+        return ADAPT_FAST;
+    if (c->ch == 3 && npix >= 1200000u && zero_per_mille <= 240u)
+        return ADAPT_SLOW;
+    if (c->ch == 3 && npix >= 1500000u && zero_per_mille <= 320u)
+        return ADAPT_SLOW;
+    return ADAPT_DEFAULT;
+}
+
 static int ranked_transforms_for(const EncCtx *c, int cand[][2], int maxn) {
-    uint64_t transform_cost[36];
+    uint64_t transform_cost[QLIC_TRANSFORM_COUNT];
     ranked_transform_scores(c, transform_cost, 1);
     int ordinary = scored_transforms[0];
     for (int i = 1; i < 11; ++i)
@@ -4884,10 +7503,25 @@ static int ranked_transforms_for(const EncCtx *c, int cand[][2], int maxn) {
             transform_cost[ordinary])
             ordinary = scored_transforms[i];
     int reversible = scored_transforms[11];
-    for (int i = 12; i < 36; ++i)
+    for (int i = 12; i < 38; ++i)
         if (transform_cost[scored_transforms[i]] <
             transform_cost[reversible])
             reversible = scored_transforms[i];
+    if (reversible >= 36) {
+        int legacy_reversible = scored_transforms[11];
+        for (int i = 12; i < 36; ++i)
+            if (transform_cost[scored_transforms[i]] <
+                transform_cost[legacy_reversible])
+                legacy_reversible = scored_transforms[i];
+        uint64_t minimum_gain =
+            (transform_cost[legacy_reversible] *
+                 SYMMETRIC_TRANSFORM_MIN_GAIN_PER_MILLE +
+             999u) /
+            1000u;
+        if (transform_cost[legacy_reversible] - transform_cost[reversible] <
+            minimum_gain)
+            reversible = legacy_reversible;
+    }
     int selected[2] = {ordinary, reversible};
     if (transform_cost[selected[1]] < transform_cost[selected[0]]) {
         int swap = selected[0];
@@ -4916,11 +7550,12 @@ static QLIC_FORCEINLINE uint32_t transform_component_cost(
     return predictor_cost_lut[a];
 }
 
-static void ranked_transform_scores(const EncCtx *c, uint64_t cost[36],
-                                    int include_reversible) {
-    /* sampling keeps transform search cheap, full encoding still decides final size */
+static void ranked_transform_scores(
+    const EncCtx *c, uint64_t cost[QLIC_TRANSFORM_COUNT],
+    int include_reversible) {
+    /* Sampling limits transform search; full encoding still decides size. */
     model_ensure();
-    memset(cost, 0, 36u * sizeof(*cost));
+    memset(cost, 0, (size_t)QLIC_TRANSFORM_COUNT * sizeof(*cost));
     uint32_t xs = c->w > 192u ? (c->w + 191u) / 192u : 1u;
     uint32_t ys = c->h > 128u ? (c->h + 127u) / 128u : 1u;
     size_t stride = c->stride;
@@ -4938,6 +7573,8 @@ static void ranked_transform_scores(const EncCtx *c, uint64_t cost[36],
             int red[5], green[5], blue[5], rg[5], bg[5], gr[5], br[5];
             int rb[5], gb[5], ycg[5], co[5], cg[5], luma[5], third[5];
             int b_rg[5], r_bg[5], g_rb[5];
+            int g_rb40[5], r_gb40[5];
+            int green9[5], normal_blue[5], sphere_blue[5];
             for (int i = 0; i < 5; ++i) {
                 int r = source[i][0];
                 int g = source[i][1];
@@ -4964,6 +7601,13 @@ static void ranked_transform_scores(const EncCtx *c, uint64_t cost[36],
                 g_rb[i] = g - ((r + b) >> 1) + 256;
                 if (include_reversible)
                     luma[i] = g + rg_luma_lift(u, v);
+                g_rb40[i] = g - floor_shift(40 * r + 24 * b, 6) + 256;
+                r_gb40[i] = r - floor_shift(40 * g + 24 * b, 6) + 256;
+                green9[i] = g + 128;
+                normal_blue[i] =
+                    b - normal_map_blue_predictor(r, g) + 256;
+                sphere_blue[i] =
+                    b - normal_map_sphere_predictor(r, g) + 256;
             }
             int has_w = x != 0;
             int has_n = y != 0;
@@ -5034,10 +7678,84 @@ static void ranked_transform_scores(const EncCtx *c, uint64_t cost[36],
                         blue[i] - floor_shift(green[i] + red[i], 1) + 256;
                 cost[35] += sr + sgr + transform_component_cost(
                     third, 9, has_w, has_n, has_ne);
+                cost[36] += sb + srb + transform_component_cost(
+                    g_rb40, 9, has_w, has_n, has_ne);
+                cost[37] += sb + sgb + transform_component_cost(
+                    r_gb40, 9, has_w, has_n, has_ne);
+                uint32_t sg9 = transform_component_cost(
+                    green9, 9, has_w, has_n, has_ne);
+                cost[38] += sr + sg9 + transform_component_cost(
+                    normal_blue, 9, has_w, has_n, has_ne);
+                cost[39] += sr + sg9 + transform_component_cost(
+                    sphere_blue, 9, has_w, has_n, has_ne);
+                cost[40] += sr + sg + transform_component_cost(
+                    sphere_blue, 9, has_w, has_n, has_ne);
             }
         }
     }
 }
+
+#ifdef QLIC_STREAM_TRACE
+static void symmetric_transform_scores(const EncCtx *c, uint64_t cost[5][18]) {
+    static const uint8_t weight[18] = {
+        8, 16, 24, 40, 48, 56, 64, 12, 20, 28, 18, 22, 26, 19, 21, 23,
+        25, 27};
+    static const uint8_t order[5][3] = {
+        {1, 2, 0}, {0, 1, 2}, {0, 2, 1}, {2, 0, 1}, {2, 1, 0}};
+    model_ensure();
+    memset(cost, 0, 5u * 18u * sizeof(cost[0][0]));
+    uint32_t xs = c->w > 192u ? (c->w + 191u) / 192u : 1u;
+    uint32_t ys = c->h > 128u ? (c->h + 127u) / 128u : 1u;
+    size_t stride = c->stride;
+    size_t row_stride = (size_t)c->w * stride;
+    for (uint32_t y = 0; y < c->h; y += ys) {
+        for (uint32_t x = 0; x < c->w; x += xs) {
+            const uint8_t *p =
+                c->pix + ((size_t)y * c->w + x) * stride;
+            const uint8_t *wp = x ? p - stride : p;
+            const uint8_t *np = y ? p - row_stride : wp;
+            const uint8_t *nwp = x && y ? np - stride : np;
+            const uint8_t *nep =
+                y && x + 1u < c->w ? np + stride : np;
+            const uint8_t *source[5] = {p, wp, np, nwp, nep};
+            int has_w = x != 0;
+            int has_n = y != 0;
+            int has_ne = y != 0 && x + 1u < c->w;
+            for (int family = 0; family < 5; ++family) {
+                int anchor[5], difference[5], third[5];
+                int anchor_channel = order[family][0];
+                int difference_channel = order[family][1];
+                int third_channel = order[family][2];
+                for (int i = 0; i < 5; ++i) {
+                    int a = source[i][anchor_channel];
+                    int b = source[i][difference_channel];
+                    anchor[i] = a;
+                    difference[i] = b - a + 256;
+                }
+                uint32_t base =
+                    transform_component_cost(anchor, 8, has_w, has_n,
+                                             has_ne) +
+                    transform_component_cost(difference, 9, has_w, has_n,
+                                             has_ne);
+                for (int wi = 0; wi < 18; ++wi) {
+                    int bw = weight[wi];
+                    for (int i = 0; i < 5; ++i) {
+                        int a = source[i][anchor_channel];
+                        int b = source[i][difference_channel];
+                        int prediction = floor_shift(
+                            bw * b + (64 - bw) * a, 6);
+                        third[i] =
+                            source[i][third_channel] - prediction + 256;
+                    }
+                    cost[family][wi] +=
+                        base + transform_component_cost(
+                                   third, 9, has_w, has_n, has_ne);
+                }
+            }
+        }
+    }
+}
+#endif
 
 static int build_palette(EncCtx *c) {
     size_t npix = (size_t)c->w * c->h; int ch = c->ch;
@@ -5111,7 +7829,7 @@ static int encode_mode_plane(const EncCtx *c, Enc *e, const uint16_t *plane,
     case PLANE_CONTEXT:
         return encode_plane37(
             e, plane, c->w, c->h, depth, tlog,
-            mode == 41 || (mode >= 44 && mode <= 54),
+            mode_has_context_map(mode),
             plane_context_for(mode), state_out, state_in, map, map_kind);
     default:
         return encode_plane(e, plane, c->w, c->h, depth, tlog, pos);
@@ -5137,6 +7855,20 @@ static int decode_mode_plane(Dec *d, uint16_t *plane, uint32_t w, uint32_t h,
     case PLANE_PATTERN:
         return decode_plane_pattern(d, plane, w, h, depth, pos);
     case PLANE_CONTEXT:
+        if (mode == 52) {
+            if (!state_in)
+                return state_out
+                           ? decode_plane52_first(d, plane, w, h, depth, tlog,
+                                                  state_out)
+                           : decode_plane52_independent(d, plane, w, h, depth,
+                                                        tlog);
+            if (!state_out)
+                return decode_plane52_last(d, plane, w, h, depth, tlog,
+                                           state_in);
+            if (state_out == state_in)
+                return decode_plane52_middle(d, plane, w, h, depth, tlog,
+                                             state_out);
+        }
         if (mode == 53) {
             if (!state_in)
                 return state_out
@@ -5153,7 +7885,7 @@ static int decode_mode_plane(Dec *d, uint16_t *plane, uint32_t w, uint32_t h,
         }
         return decode_plane37(
             d, plane, w, h, depth, tlog,
-            mode == 41 || (mode >= 44 && mode <= 54),
+            mode_has_context_map(mode),
             plane_context_for(mode), state_out, state_in);
     default:
         return zmode_zr(mode)
@@ -5205,13 +7937,14 @@ static int try_encode_limited(const EncCtx *c, int mode, int t, int tlog,
         }
     }
     int context_plane = plane_method_for(mode) == PLANE_CONTEXT;
-    int local_mode = mode == 45 || (mode >= 52 && mode <= 54);
+    int local_mode = mode == 45 || mode_has_local_state(mode);
     int map_kind =
-        mode == 45 || ((mode >= 52 && mode <= 54) &&
+        mode == 45 || (mode_has_local_state(mode) &&
                        (t != 5 || tlog != 3))
             ? MAP37_REUSE_PENALTY
             : 0;
-    if (mode >= 52 && mode <= 54 && t == 35) map_kind = 4;
+    if (mode_has_local_state(mode) && t == 35)
+        map_kind = 4;
     if (mode == 1) {
         int depth = nbits((unsigned)(c->pal_n - 1)); if (depth < 1) depth = 1;
         for (size_t i = 0; i < npix; i++) P[i] = c->pal_idx[i];
@@ -5244,15 +7977,18 @@ static int try_encode_limited(const EncCtx *c, int mode, int t, int tlog,
             return STREAM_E_ALLOC;
         }
         uint16_t *pls[3] = {P, Q, R};
-        int depth[3] = {8, t ? 9 : 8, t ? 9 : 8};
-        if (!planes_cached)
-            fwd_transform(c->pix, npix, (int)c->stride, t, pls);
+        int depth[3] = {transform_plane_depth(t, 0),
+                        transform_plane_depth(t, 1),
+                        transform_plane_depth(t, 2)};
         uint8_t *state = local_mode ? malloc(npix) : NULL;
         if (local_mode && !state) {
+            free(state);
             if (!planes_cached) { free(Q); free(R); free(P); }
             free(e.buf);
             return STREAM_E_ALLOC;
         }
+        if (!planes_cached && err == STREAM_OK)
+            fwd_transform(c->pix, npix, (int)c->stride, t, pls);
         for (int p = 0; p < 3 && err == STREAM_OK; p++) {
             int plane_map_kind = map_kind;
             if (c->map37_override) plane_map_kind = c->map37_penalty[p];
@@ -5269,12 +8005,15 @@ static int try_encode_limited(const EncCtx *c, int mode, int t, int tlog,
             err = encode_mode_plane(
                 c, &e, pls[p], depth[p], mode, t, tlog, p,
                 p == 0 || (local_mode && p == 1) ? state : NULL,
-                p ? state : NULL, map, plane_map_kind);
+                p ? state : NULL,
+                map,
+                plane_map_kind);
         }
         free(state);
         if (!planes_cached) { free(Q); free(R); }
     }
-    if (mode != 1 && c->ch == 4 && !c->const_alpha && err == STREAM_OK) {
+    if (mode != 1 && c->ch == 4 && !c->const_alpha &&
+        err == STREAM_OK) {
         for (size_t i = 0; i < npix; i++) P[i] = c->pix[i * sch + 3u];
         const uint8_t *map = NULL;
         if (context_plane)
@@ -5324,13 +8063,179 @@ static int try_encode_limited(const EncCtx *c, int mode, int t, int tlog,
     return STREAM_OK;
 }
 
+#ifdef QLIC_STREAM_TRACE
+static int trace_sampled_residual_profile(
+    const EncCtx *c, int transform, uint64_t *cost_out,
+    uint64_t *cost_square_out, uint64_t *events_out, uint64_t *zero_out,
+    uint64_t *small1_out, uint64_t *small3_out, uint64_t *large16_out,
+    uint64_t *zero_change_out) {
+    size_t npix = (size_t)c->w * c->h;
+    if (npix > SIZE_MAX / (3u * sizeof(uint16_t))) return STREAM_E_DIM;
+    uint16_t *data = malloc(npix * 3u * sizeof(*data));
+    if (!data) return STREAM_E_ALLOC;
+    uint16_t *plane[3] = {data, data + npix, data + npix * 2u};
+    fwd_transform(c->pix, npix, (int)c->stride, transform, plane);
+    model_ensure();
+    uint32_t xs = c->w > 192u ? (c->w + 191u) / 192u : 1u;
+    uint32_t ys = c->h > 128u ? (c->h + 127u) / 128u : 1u;
+    uint64_t cost = 0, cost_square = 0, events = 0, zero = 0;
+    uint64_t small1 = 0, small3 = 0, large16 = 0, zero_change = 0;
+    int previous_zero[3] = {0};
+    int have_previous[3] = {0};
+    for (uint32_t y = 0; y < c->h; y += ys) {
+        for (uint32_t x = 0; x < c->w; x += xs) {
+            size_t i = (size_t)y * c->w + x;
+            size_t wi = x ? i - 1u : i;
+            size_t ni = y ? i - (size_t)c->w : wi;
+            size_t nwi = x && y ? ni - 1u : ni;
+            size_t nei = y && x + 1u < c->w ? ni + 1u : ni;
+            for (int p = 0; p < 3; ++p) {
+                int maxv = transform == 0 || p == 0 ? 255 : 511;
+                int half = (maxv + 1) >> 1;
+                int prediction = predict(
+                    0, plane[p][wi], plane[p][ni], plane[p][nwi],
+                    plane[p][nei], maxv);
+                int residual =
+                    (((int)plane[p][i] - prediction + half) & maxv) - half;
+                unsigned magnitude = (unsigned)iabs(residual);
+                unsigned event_cost = predictor_cost_lut[magnitude];
+                int is_zero = magnitude == 0;
+                cost += event_cost;
+                cost_square += (uint64_t)event_cost * event_cost;
+                ++events;
+                zero += (unsigned)is_zero;
+                small1 += magnitude <= 1u;
+                small3 += magnitude <= 3u;
+                large16 += magnitude >= 16u;
+                if (have_previous[p] && previous_zero[p] != is_zero)
+                    ++zero_change;
+                previous_zero[p] = is_zero;
+                have_previous[p] = 1;
+            }
+        }
+    }
+    free(data);
+    *cost_out = cost;
+    *cost_square_out = cost_square;
+    *events_out = events;
+    *zero_out = zero;
+    *small1_out = small1;
+    *small3_out = small3;
+    *large16_out = large16;
+    *zero_change_out = zero_change;
+    return STREAM_OK;
+}
+
+static void trace_adaptation_candidates(EncCtx *c,
+                                        const uint8_t *current,
+                                        size_t current_size,
+                                        uint64_t transform_score,
+                                        uint64_t transform_samples,
+                                        const char *route) {
+    if (!current || current_size <= STREAM_HDR || current[14] != 52)
+        return;
+    const char *adapt_trace = getenv("QLIC_TRACE_ADAPTATION");
+    if (!adapt_trace || !adapt_trace[0] || adapt_trace[0] == '0') return;
+    int transform = current[15];
+    int tile_log = current[16];
+    int current_adapt = c->ch == 4 && c->const_alpha
+                            ? ADAPT_DEFAULT
+                            : current[17];
+    if (current_adapt != ADAPT_FAST && current_adapt != ADAPT_SLOW)
+        current_adapt = ADAPT_DEFAULT;
+    uint64_t profile_cost = 0, profile_cost_square = 0, profile_events = 0;
+    uint64_t profile_zero = 0, profile_small1 = 0, profile_small3 = 0;
+    uint64_t profile_large16 = 0, profile_zero_change = 0;
+    (void)trace_sampled_residual_profile(
+        c, transform, &profile_cost, &profile_cost_square, &profile_events,
+        &profile_zero, &profile_small1, &profile_small3, &profile_large16,
+        &profile_zero_change);
+    unsigned sampled_zero_per_mille =
+        sampled_zero_per_mille_for(c, transform);
+    unsigned sampled_small1_per_mille = c->small1_per_mille[transform];
+    const char *profile_only =
+        getenv("QLIC_TRACE_ADAPTATION_PROFILE_ONLY");
+    if (profile_only && profile_only[0] && profile_only[0] != '0') {
+        fprintf(stderr,
+                "adaptation-profile mode=52 transform=%d tile=%d pixels=%zu "
+                "channels=%d constant-alpha=%d route=%s "
+                "score=%llu samples=%llu profile-cost=%llu "
+                "profile-cost-square=%llu events=%llu zero=%llu "
+                "small1=%llu small3=%llu large16=%llu zero-change=%llu "
+                "sample-zero-per-mille=%u sample-small1-per-mille=%u "
+                "current-adapt=%d current-bytes=%zu\n",
+                transform, tile_log, (size_t)c->w * c->h, c->ch,
+                c->const_alpha, route,
+                (unsigned long long)transform_score,
+                (unsigned long long)transform_samples,
+                (unsigned long long)profile_cost,
+                (unsigned long long)profile_cost_square,
+                (unsigned long long)profile_events,
+                (unsigned long long)profile_zero,
+                (unsigned long long)profile_small1,
+                (unsigned long long)profile_small3,
+                (unsigned long long)profile_large16,
+                (unsigned long long)profile_zero_change,
+                sampled_zero_per_mille, sampled_small1_per_mille, current_adapt,
+                current_size);
+        return;
+    }
+    for (int adapt = ADAPT_FAST; adapt <= ADAPT_SLOW; ++adapt) {
+        if (adapt == current_adapt) continue;
+        uint8_t *candidate = NULL;
+        size_t candidate_size = 0;
+        double started = stream_trace_now();
+        int candidate_error = try_encode_limited(
+            c, 52, transform, tile_log, adapt, SIZE_MAX,
+            &candidate, &candidate_size);
+        fprintf(stderr,
+                "adaptation-probe mode=52 transform=%d tile=%d pixels=%zu "
+                "channels=%d constant-alpha=%d route=%s "
+                "score=%llu samples=%llu "
+                "profile-cost=%llu profile-cost-square=%llu events=%llu "
+                "zero=%llu small1=%llu small3=%llu large16=%llu "
+                "zero-change=%llu "
+                "sample-zero-per-mille=%u sample-small1-per-mille=%u "
+                "current-adapt=%d current-bytes=%zu candidate-adapt=%d "
+                "candidate-bytes=%zu seconds=%.9f error=%d\n",
+                transform, tile_log, (size_t)c->w * c->h, c->ch,
+                c->const_alpha, route,
+                (unsigned long long)transform_score,
+                (unsigned long long)transform_samples,
+                (unsigned long long)profile_cost,
+                (unsigned long long)profile_cost_square,
+                (unsigned long long)profile_events,
+                (unsigned long long)profile_zero,
+                (unsigned long long)profile_small1,
+                (unsigned long long)profile_small3,
+                (unsigned long long)profile_large16,
+                (unsigned long long)profile_zero_change,
+                sampled_zero_per_mille, sampled_small1_per_mille, current_adapt,
+                current_size, adapt,
+                candidate_error == STREAM_OK ? candidate_size : 0,
+                stream_trace_now() - started, candidate_error);
+        free(candidate);
+    }
+}
+#endif
+
 static int try_improve(const EncCtx *c, int mode, int transform, int tlog,
                        int adapt, uint8_t **best, size_t *best_size) {
     uint8_t *candidate = NULL;
     size_t candidate_size = 0;
+#ifdef QLIC_STREAM_TRACE
+    size_t limit = *best_size;
+    double started = c->trace ? stream_trace_now() : 0.0;
+#endif
     int err = try_encode_limited(c, mode, transform, tlog, adapt, *best_size,
                                  &candidate, &candidate_size);
-    if (err == STREAM_OK && candidate_size < *best_size) {
+    int won = err == STREAM_OK && candidate_size < *best_size;
+#ifdef QLIC_STREAM_TRACE
+    stream_trace_trial(c, "improve", mode, transform, tlog, adapt, limit,
+                       candidate_size, err, won,
+                       c->trace ? stream_trace_now() - started : 0.0);
+#endif
+    if (won) {
         free(*best);
         *best = candidate;
         *best_size = candidate_size;
@@ -5352,11 +8257,21 @@ static int try_improve_margin(const EncCtx *c, int mode, int transform,
     if (minimum >= *best_size) return 0;
     uint8_t *candidate = NULL;
     size_t candidate_size = 0;
+#ifdef QLIC_STREAM_TRACE
+    size_t limit = *best_size - minimum;
+    double started = c->trace ? stream_trace_now() : 0.0;
+#endif
     int err = try_encode_limited(c, mode, transform, tlog, adapt,
                                  *best_size - minimum, &candidate,
                                  &candidate_size);
-    if (err == STREAM_OK && candidate_size < *best_size &&
-        *best_size - candidate_size >= minimum) {
+    int won = err == STREAM_OK && candidate_size < *best_size &&
+              *best_size - candidate_size >= minimum;
+#ifdef QLIC_STREAM_TRACE
+    stream_trace_trial(c, "improve", mode, transform, tlog, adapt, limit,
+                       candidate_size, err, won,
+                       c->trace ? stream_trace_now() - started : 0.0);
+#endif
+    if (won) {
         free(*best);
         *best = candidate;
         *best_size = candidate_size;
@@ -5376,7 +8291,9 @@ static int weighted_proxy_for(const EncCtx *c, int transform, int tlog,
     uint16_t *planes[3];
     int err = cached_transform_planes(c, transform, planes);
     if (err != STREAM_OK) return err;
-    int depth[3] = {8, transform ? 9 : 8, transform ? 9 : 8};
+    int depth[3] = {transform_plane_depth(transform, 0),
+                    transform_plane_depth(transform, 1),
+                    transform_plane_depth(transform, 2)};
     int map_kind =
         transform == 35
             ? 4
@@ -5452,10 +8369,31 @@ typedef struct {
     size_t limit;
 } TrialRun;
 
+enum {
+    EVENT_ORDER_RGBA_MAX_PIXELS = 1500000,
+    EVENT_ORDER_RGBA_SIZE_DIVISOR = 16,
+    EVENT_ORDER_OTHER_SIZE_DIVISOR = 12
+};
+
+static int event_order_image_is_eligible(const EncCtx *ctx, size_t npix) {
+    return npix <= 0xffffffu &&
+           (ctx->ch != 4 || npix <= EVENT_ORDER_RGBA_MAX_PIXELS);
+}
+
+static int event_order_trial_is_plausible(const EncCtx *ctx,
+                                          size_t incumbent_size) {
+    if (incumbent_size == SIZE_MAX) return 1;
+    size_t divisor = ctx->ch == 4 ? EVENT_ORDER_RGBA_SIZE_DIVISOR
+                                  : EVENT_ORDER_OTHER_SIZE_DIVISOR;
+    size_t sparse_limit =
+        STREAM_HDR + (size_t)ctx->w * ctx->h / divisor;
+    return incumbent_size <= sparse_limit;
+}
+
 typedef struct {
     const EncCtx *ctx;
-    uint8_t transform[36];
-    int error[36];
+    uint8_t transform[QLIC_TRANSFORM_COUNT];
+    int error[QLIC_TRANSFORM_COUNT];
     int count;
 } TransformPrep;
 
@@ -5477,7 +8415,7 @@ static int prepare_trial_transforms(const TrialRun *r, unsigned threads) {
     for (int i = 0; i < r->count; ++i) {
         if (r->specs[i].mode == 1) continue;
         unsigned transform = r->specs[i].t;
-        if (transform >= 36u) return STREAM_E_FORMAT;
+        if (transform >= QLIC_TRANSFORM_COUNT) return STREAM_E_FORMAT;
         uint64_t bit = UINT64_C(1) << transform;
         if (seen & bit) continue;
         seen |= bit;
@@ -5520,13 +8458,42 @@ static void run_trials(TrialRun *r, unsigned threads) {
     if (threads <= 1) {
         size_t best = SIZE_MAX;
         for (int i = 0; i < r->count; i++) {
+            /* Try mode 39's nine residual-plane passes only when a low-cost
+               candidate shows the sparsity seen in measured winners. */
+            if (r->specs[i].mode == 39 &&
+                !event_order_trial_is_plausible(r->ctx, best)) {
+                r->rerr[i] = STREAM_E_FORMAT;
+                r->rlen[i] = 0;
+                r->res[i] = NULL;
+#ifdef QLIC_STREAM_TRACE
+                stream_trace_trial(
+                    r->ctx, "trial", r->specs[i].mode, r->specs[i].t,
+                    r->specs[i].tlog,
+                    r->specs[i].adapt ? r->specs[i].adapt : ADAPT_DEFAULT,
+                    best, 0, STREAM_E_FORMAT, 0, 0.0);
+#endif
+                continue;
+            }
+#ifdef QLIC_STREAM_TRACE
+            size_t limit = best;
+            double started = r->ctx->trace ? stream_trace_now() : 0.0;
+#endif
             r->rerr[i] = try_encode_limited(
                 r->ctx, r->specs[i].mode, r->specs[i].t,
                 r->specs[i].tlog,
                 r->specs[i].adapt ? r->specs[i].adapt : ADAPT_DEFAULT,
                 best, &r->res[i],
                 &r->rlen[i]);
-            if (r->rerr[i] == STREAM_OK && r->rlen[i] < best) best = r->rlen[i];
+            int won = r->rerr[i] == STREAM_OK && r->rlen[i] < best;
+#ifdef QLIC_STREAM_TRACE
+            stream_trace_trial(
+                r->ctx, "trial", r->specs[i].mode, r->specs[i].t,
+                r->specs[i].tlog,
+                r->specs[i].adapt ? r->specs[i].adapt : ADAPT_DEFAULT,
+                limit, r->rlen[i], r->rerr[i], won,
+                r->ctx->trace ? stream_trace_now() - started : 0.0);
+#endif
+            if (won) best = r->rlen[i];
         }
         return;
     }
@@ -5622,16 +8589,18 @@ static int find_trial_spec(const TrialSpec *specs, int start, int count,
 }
 
 static QLIC_NOINLINE int refine_context_trials(
-    const EncCtx *c, const TrialSpec *trials, int best,
-    const size_t *trial_sizes, const int *trial_errors, int trial_count,
-    const int base[][2], int base_count, int search, size_t npix,
-    int root_tlog, unsigned threads,
+    EncCtx *c, const TrialSpec *trials, int best, int search, size_t npix,
+    int root_tlog, uint64_t adaptation_score, uint64_t adaptation_samples,
+    unsigned threads,
     uint8_t **best_data, size_t *best_size) {
     TrialSpec specs[24];
     int count = 0;
     int first_index = count;
+    int first_adapt = sampled_adaptation_for(
+        c, npix, trials[best].t, adaptation_score, adaptation_samples);
     specs[count++] =
-        (TrialSpec){52, trials[best].t, (uint8_t)root_tlog, ADAPT_DEFAULT, 0};
+        (TrialSpec){52, trials[best].t, (uint8_t)root_tlog,
+                    (uint8_t)first_adapt, 0};
     int fast_index = -1;
     if (npix <= 1000000u) {
         fast_index = count;
@@ -5639,37 +8608,29 @@ static QLIC_NOINLINE int refine_context_trials(
             (TrialSpec){trials[best].mode, trials[best].t,
                         trials[best].tlog, ADAPT_FAST, 0};
     }
-    int transform_index = count;
-    if (search == 1 && base_count >= 2) {
-        int transforms[2];
-        int transform_count = 0;
-        int current = trials[best].t;
-        for (int i = 0; i < 2; ++i) {
-            if (base[i][0] == current) continue;
-            transforms[transform_count++] = base[i][0];
-        }
-        for (int i = 0; i < transform_count; ++i) {
-            int transform = transforms[i];
-            int tile_log = root_tile_log_for(
-                trials, trial_sizes, trial_errors, trial_count, transform, 4,
-                npix);
-            specs[count++] =
-                (TrialSpec){52, (uint8_t)transform, (uint8_t)tile_log,
-                            ADAPT_DEFAULT, 0};
-        }
-    }
+    /* On tiny zero-heavy inputs the existing fast spatial trial is both
+       smaller and cheaper than mode 52.  Decide before either encode so trial
+       order cannot hide it, and replace work rather than adding a candidate. */
+    int tiny_fast_preferred =
+        fast_index >= 0 && npix <= 8192u &&
+        first_adapt == ADAPT_DEFAULT &&
+        sampled_zero_per_mille_for(c, trials[best].t) >= 700u &&
+        (trials[best].mode == 37 || trials[best].mode == 41);
     if (threads <= 1u || count == 1) {
-        try_improve(c, specs[first_index].mode, specs[first_index].t,
-                    specs[first_index].tlog, ADAPT_DEFAULT, best_data,
-                    best_size);
-        if (fast_index >= 0 && *best_size > STREAM_HDR &&
-            ((*best_data)[14] == 37 || (*best_data)[14] == 41))
+        if (tiny_fast_preferred) {
             try_improve(c, specs[fast_index].mode, specs[fast_index].t,
                         specs[fast_index].tlog, ADAPT_FAST, best_data,
                         best_size);
-        for (int i = transform_index; i < count; ++i)
-            try_improve(c, specs[i].mode, specs[i].t, specs[i].tlog,
-                        ADAPT_DEFAULT, best_data, best_size);
+        } else {
+            try_improve(c, specs[first_index].mode, specs[first_index].t,
+                        specs[first_index].tlog, specs[first_index].adapt,
+                        best_data, best_size);
+            if (fast_index >= 0 && *best_size > STREAM_HDR &&
+                ((*best_data)[14] == 37 || (*best_data)[14] == 41))
+                try_improve(c, specs[fast_index].mode, specs[fast_index].t,
+                            specs[fast_index].tlog, ADAPT_FAST, best_data,
+                            best_size);
+        }
         return 0;
     }
     int primary_count = count;
@@ -5700,14 +8661,17 @@ static QLIC_NOINLINE int refine_context_trials(
     run.rerr = errors;
     run.limit = *best_size;
     run_trials(&run, threads);
-    accept_trial(best_data, best_size, &results[first_index],
-                 sizes[first_index], errors[first_index]);
-    if (fast_index >= 0 && *best_size > STREAM_HDR &&
-        ((*best_data)[14] == 37 || (*best_data)[14] == 41))
+    if (tiny_fast_preferred) {
         accept_trial(best_data, best_size, &results[fast_index],
                      sizes[fast_index], errors[fast_index]);
-    for (int i = transform_index; i < primary_count; ++i)
-        accept_trial(best_data, best_size, &results[i], sizes[i], errors[i]);
+    } else {
+        accept_trial(best_data, best_size, &results[first_index],
+                     sizes[first_index], errors[first_index]);
+        if (fast_index >= 0 && *best_size > STREAM_HDR &&
+            ((*best_data)[14] == 37 || (*best_data)[14] == 41))
+            accept_trial(best_data, best_size, &results[fast_index],
+                         sizes[fast_index], errors[fast_index]);
+    }
     if (fused && *best_size > STREAM_HDR && (*best_data)[14] == 52) {
         int transform = (*best_data)[15];
         int tlog = (*best_data)[16];
@@ -5744,7 +8708,7 @@ static QLIC_NOINLINE int refine_context_trials(
 static int stream_encode_strided_base(
     const uint8_t *pix, uint32_t w, uint32_t h, int channels,
     size_t pixel_stride, int search, unsigned threads, int sample_bits,
-    size_t limit,
+    size_t limit, const TrialSpec *forced_trial,
     uint8_t **out, size_t *outn) {
     if (out) *out = NULL;
     if (outn) *outn = 0;
@@ -5768,6 +8732,14 @@ static int stream_encode_strided_base(
         stream_crc32_pixels(pix, npix, (size_t)channels, pixel_stride);
     c.map37_cache = &map_cache;
     c.gray_map_cache = &gray_map_cache;
+#ifdef QLIC_STREAM_TRACE
+    const char *trace_value = getenv("QLIC_TRACE_STREAM");
+    c.trace = trace_value && trace_value[0] && trace_value[0] != '0';
+    if (c.trace)
+        fprintf(stderr,
+                "stream-begin pixels=%zu channels=%d search=%d limit=%zu\n",
+                npix, channels, search, limit);
+#endif
 
     if (channels == 3) {
         c.gray = 1;
@@ -5780,6 +8752,21 @@ static int stream_encode_strided_base(
         c.const_alpha = 1; c.alpha_val = pix[3];
         for (size_t i = 0; i < npix && c.const_alpha; i++)
             if (pix[i * pixel_stride + 3u] != c.alpha_val) c.const_alpha = 0;
+    }
+    if (forced_trial) {
+        if ((channels < 3 || c.gray) && forced_trial->t != 0) {
+            free_map37_cache(&map_cache);
+            free_gray_map_cache(&gray_map_cache);
+            free_transform_plane_cache(&transform_plane_cache);
+            return STREAM_E_ARG;
+        }
+        int forced_error = try_encode_limited(
+            &c, forced_trial->mode, forced_trial->t,
+            forced_trial->tlog, forced_trial->adapt, limit, out, outn);
+        free_map37_cache(&map_cache);
+        free_gray_map_cache(&gray_map_cache);
+        free_transform_plane_cache(&transform_plane_cache);
+        return forced_error;
     }
     int perr = channels >= 3 ? build_palette(&c) : STREAM_OK;
     if (perr != STREAM_OK) return perr;
@@ -5812,21 +8799,58 @@ static int stream_encode_strided_base(
     int fast_ordinary = nb > 0 ? base[0][0] : 0;
     int fast_alternate = -1;
     int fast_alternate_close = 0;
+    int fast_specialist_decisive = 0;
     int fast_dense = 0;
+    int normal_map_candidate = 0;
+    int sphere_map_candidate = 0;
+    int compact_sphere_candidate = 0;
+    uint64_t fast_transform_score = 0;
+    uint64_t fast_transform_samples = 0;
+    uint64_t normal_map_score = 0;
+    uint64_t sphere_map_score = 0;
+    uint64_t compact_sphere_score = 0;
     if (search <= 0 && color && nb > 0)
         base[0][0] = fast_transform_for(
             &c, &fast_ordinary, &fast_alternate, &fast_alternate_close,
-            &fast_dense);
+            &fast_specialist_decisive, &fast_dense, &fast_transform_score,
+            &fast_transform_samples, &normal_map_candidate,
+            &normal_map_score, &sphere_map_candidate, &sphere_map_score,
+            &compact_sphere_candidate, &compact_sphere_score);
     if (search == 1 && color)
         nb = ranked_transforms_for(&c, base, 2);
     if (search <= 1 && color && !pal_ok && nb > 0 &&
         npix > 1000000u && zero_run_candidate_for(&c, base[0][0])) {
         uint8_t *fast = NULL;
         size_t fastn = 0;
-        int ferr = try_encode_limited(&c, 45, base[0][0], 3, ADAPT_DEFAULT,
+        /* RGB transform 29 is a measured mode-52 replacement here: it is
+           smaller and faster to decode on both discovery and holdout, so
+           select it directly instead of paying for two streams. */
+        int fast_mode = channels == 3 && base[0][0] == 29 ? 52 : 45;
+        int ferr = try_encode_limited(&c, fast_mode, base[0][0], 3,
+                                      ADAPT_DEFAULT,
                                       SIZE_MAX, &fast, &fastn);
         if (ferr == STREAM_OK && fastn < npix * 3u / 8u) {
-            try_improve(&c, 45, base[0][0], 0, ADAPT_DEFAULT, &fast, &fastn);
+            try_improve(&c, fast_mode, base[0][0], 0, ADAPT_DEFAULT, &fast,
+                        &fastn);
+            /* Variable-alpha RGBA has one simple CPU split here: existing
+               mode 52 is the measured smaller and faster choice through four
+               megapixels, while three late luma ranks retain the same result
+               above it. The completed mode-45 stream remains the size gate,
+               so misses add bounded encode work but cannot regress a file. */
+            if (channels == 4 && !c.const_alpha &&
+                (npix <= 4000000u || base[0][0] == 30 ||
+                 base[0][0] == 33 || base[0][0] == 34))
+                try_improve(&c, 52, base[0][0], 3, ADAPT_DEFAULT, &fast,
+                            &fastn);
+            /* Mode 52 is a measured smaller, faster decoder choice for the
+               common RGB luma ranks below. Keep the completed mode-45 stream
+               as the byte limit: a miss stops or loses without changing the
+               output, while a win replaces it with an existing stream mode. */
+            if (channels == 3 && fast_mode == 45 &&
+                ((base[0][0] >= 1 && base[0][0] <= 3) ||
+                 (base[0][0] >= 30 && base[0][0] <= 33)))
+                try_improve(&c, 52, base[0][0], 3, ADAPT_DEFAULT, &fast,
+                            &fastn);
             *out = fast;
             *outn = fastn;
             free_map37_cache(&map_cache);
@@ -5839,11 +8863,91 @@ static int stream_encode_strided_base(
     }
     int small_l5 = npix <= 300000u;
     int event_ok = npix <= 0xffffffu;
+    int event_order_ok = event_order_image_is_eligible(&c, npix);
     /* dense photos usually end at mode 53, starting there avoids two discarded encodes */
     int direct_context =
         search <= 0 && color && !pal_ok && !sample_bits && fast_dense &&
         npix >= 200000u && npix <= 500000u && base[0][0] != 0 &&
         base[0][0] != 9 && base[0][0] != 10;
+    /*
+     * Two low-cost transform ranks route ordinary RGBA streams.
+     * Keep identity/YCoCg agreement and transform-35 disagreement in the
+     * tournament: those are the ambiguous cases in the broad trace.
+     */
+    int direct_rgba_transform =
+        base[0][0] == fast_ordinary
+            ? base[0][0] != 0 && base[0][0] != 2
+            : base[0][0] < 35;
+    int direct_rgba_context =
+        search <= 0 && channels == 4 && color && !pal_ok && !sample_bits &&
+        !fast_dense && npix > 4096u && direct_rgba_transform;
+    /* Transform 34 can narrowly outrank the ordinary RGB transform in the
+       sample while losing after a full encode.  Keep that ambiguous case in
+       the tournament; every other medium RGB route is stable in the trace. */
+    int direct_rgb_transform =
+        base[0][0] != 34 || base[0][0] == fast_ordinary ||
+        fast_specialist_decisive;
+    int direct_rgb_context =
+        search <= 0 && channels == 3 && color && !pal_ok && !sample_bits &&
+        !direct_context && direct_rgb_transform && npix > 65536u &&
+        npix <= 1000000u;
+#ifdef QLIC_STREAM_TRACE
+    if (c.trace)
+        fprintf(stderr,
+                "stream-route pixels=%zu channels=%d color=%d palette=%d "
+                 "constant-alpha=%d transform=%d ordinary=%d dense=%d "
+                 "specialist=%d direct-context=%d direct-rgba=%d "
+                 "direct-rgb=%d\n",
+                 npix, channels, color, pal_ok, c.const_alpha, base[0][0],
+                 fast_ordinary, fast_dense, fast_specialist_decisive,
+                 direct_context, direct_rgba_context, direct_rgb_context);
+#endif
+    if (direct_rgb_context || direct_rgba_context) {
+        uint8_t *direct = NULL;
+        size_t direct_size = 0;
+        int direct_adapt = sampled_adaptation_for(
+            &c, npix, base[0][0], fast_transform_score,
+            fast_transform_samples);
+        int direct_error = try_encode_limited(
+            &c, 52, base[0][0], 4, direct_adapt, limit,
+            &direct, &direct_size);
+        if (direct_error == STREAM_OK) {
+            if (normal_map_candidate && channels == 3) {
+                int normal_adapt = sampled_adaptation_for(
+                    &c, npix, 38, normal_map_score,
+                    fast_transform_samples);
+                try_improve(&c, 52, 38, 4, normal_adapt, &direct,
+                            &direct_size);
+            }
+            if (sphere_map_candidate && channels == 3) {
+                int sphere_adapt = sampled_adaptation_for(
+                    &c, npix, 39, sphere_map_score,
+                    fast_transform_samples);
+                try_improve(&c, 52, 39, 4, sphere_adapt, &direct,
+                            &direct_size);
+            } else if (compact_sphere_candidate && channels == 3) {
+                int compact_adapt = sampled_adaptation_for(
+                    &c, npix, 40, compact_sphere_score,
+                    fast_transform_samples);
+                try_improve(&c, 52, 40, 4, compact_adapt, &direct,
+                            &direct_size);
+            }
+#ifdef QLIC_STREAM_TRACE
+            trace_adaptation_candidates(
+                &c, direct, direct_size, fast_transform_score,
+                fast_transform_samples,
+                direct_rgb_context ? "direct-rgb" : "direct-rgba");
+#endif
+            *out = direct;
+            *outn = direct_size;
+            free_map37_cache(&map_cache);
+            free_gray_map_cache(&gray_map_cache);
+            free_transform_plane_cache(&transform_plane_cache);
+            free(c.pal_idx);
+            return STREAM_OK;
+        }
+        free(direct);
+    }
     TrialSpec cl[64] = {0};
     int nc = 0;
     char seen[8] = {0}, seen_x[8] = {0}, seen_r[8] = {0};
@@ -5866,11 +8970,33 @@ static int stream_encode_strided_base(
                     direct_context ? 53
                                    : npix > 1000000u && !pal_ok ? 52 : 37;
                 cl[nc].t =
-                    npix > 1000000u && !pal_ok
+                    npix > 1000000u && !pal_ok &&
+                            !(fast_dense && fast_specialist_decisive)
                         ? (uint8_t)fast_ordinary
                         : t;
                 cl[nc].tlog =
                     npix > 1000000u && !pal_ok ? 3 : L;
+                if (cl[nc].mode == 52)
+                    cl[nc].adapt = (uint8_t)sampled_adaptation_for(
+                        &c, npix, cl[nc].t, fast_transform_score,
+                        fast_transform_samples);
+                /* Two bounded RGB pockets pay about 25--30% more decode time
+                   for mode 52's exact contexts.  Reuse the chosen transform,
+                   adaptation, shape, and already-cached zero sample to select
+                   simpler tile-4 mode 37 without another scan or trial. */
+                if (cl[nc].mode == 52 && channels == 3) {
+                    uint64_t transform_bit = UINT64_C(1) << cl[nc].t;
+                    int medium_rectangular_dense =
+                        npix <= 1400000u && c.w != c.h &&
+                        (c.zero_run_known_mask & transform_bit) != 0 &&
+                        c.zero_run_per_mille[cl[nc].t] <= 200u;
+                    if ((cl[nc].t == 5 &&
+                         cl[nc].adapt == ADAPT_SLOW) ||
+                        medium_rectangular_dense) {
+                        cl[nc].mode = 37;
+                        cl[nc].tlog = 4;
+                    }
+                }
                 nc++;
             } else {
                 cl[nc].mode = 0; cl[nc].t = t; cl[nc].tlog = L; nc++;
@@ -5883,7 +9009,9 @@ static int stream_encode_strided_base(
             if (search == 7 && L == 4) { cl[nc].mode = 38; cl[nc].t = t; cl[nc].tlog = 0; nc++; }
             if (event_ok && L == 4 && special_color_trials < 2) {
                 special_color_trials++;
-                cl[nc].mode = 39; cl[nc].t = t; cl[nc].tlog = 0; nc++;
+                if (event_order_ok) {
+                    cl[nc].mode = 39; cl[nc].t = t; cl[nc].tlog = 0; nc++;
+                }
                 cl[nc].mode = 40; cl[nc].t = t; cl[nc].tlog = 1; nc++;
             }
             if (search == 7 && L == 4 && i < 3) { cl[nc].mode = 42; cl[nc].t = t; cl[nc].tlog = L; nc++; }
@@ -5903,16 +9031,41 @@ static int stream_encode_strided_base(
                 seen_x[L] = 1;
                 cl[nc].mode = 26; cl[nc].t = 0; cl[nc].tlog = L; nc++;
                 cl[nc].mode = 27; cl[nc].t = 0; cl[nc].tlog = L; nc++;
-                if (L == 4) { cl[nc].mode = 25; cl[nc].t = 0; cl[nc].tlog = L; nc++; }
-                if (L == 4) { cl[nc].mode = 42; cl[nc].t = 0; cl[nc].tlog = L; nc++; }
+                if (L == 4) {
+                    cl[nc].mode = 25; cl[nc].t = 0; cl[nc].tlog = L; nc++;
+                    cl[nc].mode = 42; cl[nc].t = 0; cl[nc].tlog = L; nc++;
+                }
             }
             if (L == 4 && !seen_r[L] && search > 0) {
                 seen_r[L] = 1;
                 cl[nc].mode = 38; cl[nc].t = 0; cl[nc].tlog = 0; nc++;
-                if (event_ok) { cl[nc].mode = 39; cl[nc].t = 0; cl[nc].tlog = 0; nc++; }
+                if (event_order_ok) { cl[nc].mode = 39; cl[nc].t = 0; cl[nc].tlog = 0; nc++; }
                 if (event_ok) { cl[nc].mode = 40; cl[nc].t = 0; cl[nc].tlog = 1; nc++; }
             }
         }
+    }
+    if (normal_map_candidate && channels == 3 && search <= 0) {
+        cl[nc].mode = 52;
+        cl[nc].t = 38;
+        cl[nc].tlog = (uint8_t)(npix > 1000000u ? 3 : 4);
+        cl[nc].adapt = (uint8_t)sampled_adaptation_for(
+            &c, npix, 38, normal_map_score, fast_transform_samples);
+        nc++;
+    }
+    if (sphere_map_candidate && channels == 3 && search <= 0) {
+        cl[nc].mode = 52;
+        cl[nc].t = 39;
+        cl[nc].tlog = (uint8_t)(npix > 1000000u ? 3 : 4);
+        cl[nc].adapt = (uint8_t)sampled_adaptation_for(
+            &c, npix, 39, sphere_map_score, fast_transform_samples);
+        nc++;
+    } else if (compact_sphere_candidate && channels == 3 && search <= 0) {
+        cl[nc].mode = 52;
+        cl[nc].t = 40;
+        cl[nc].tlog = (uint8_t)(npix > 1000000u ? 3 : 4);
+        cl[nc].adapt = (uint8_t)sampled_adaptation_for(
+            &c, npix, 40, compact_sphere_score, fast_transform_samples);
+        nc++;
     }
     if (color && search == 1 && !pal_ok && npix <= 300000u) {
         int selected = 0;
@@ -5942,7 +9095,7 @@ static int stream_encode_strided_base(
     if (c.map37_cache) {
         uint64_t map3 = 0, map4 = 0;
         for (int i = 0; i < nc; ++i) {
-            if (cl[i].t > 35) continue;
+            if (cl[i].t >= QLIC_TRANSFORM_COUNT) continue;
             uint64_t bit = UINT64_C(1) << cl[i].t;
             if (color && search == 1 && cl[i].mode == 25 &&
                 cl[i].tlog == 4)
@@ -6030,8 +9183,9 @@ static int stream_encode_strided_base(
         color && !spatial_dominant &&
         (cl[best].mode == 37 || cl[best].mode == 41)) {
         fused_context = refine_context_trials(
-            &c, cl, best, rlen, rerr, nc, base, nb, search, npix,
-            root_tlog, threads, &res[best], &rlen[best]);
+            &c, cl, best, search, npix,
+            root_tlog, fast_transform_score, fast_transform_samples, threads,
+            &res[best], &rlen[best]);
     }
     if (best >= 0 && search <= 0 && color && npix >= 200000u &&
         npix <= 1000000u && rlen[best] > STREAM_HDR) {
@@ -6053,8 +9207,12 @@ static int stream_encode_strided_base(
             (res[best][14] == 52 && res[best][15] == 34);
         if (alternate_profile && fast_alternate >= 0 &&
             fast_alternate_close && bits <= (uint64_t)npix * 4u)
-            try_improve(&c, 52, fast_alternate, 4, ADAPT_DEFAULT, &res[best],
-                        &rlen[best]);
+            try_improve(
+                &c, 52, fast_alternate, 4,
+                sampled_adaptation_for(
+                    &c, npix, fast_alternate, fast_transform_score,
+                    fast_transform_samples),
+                &res[best], &rlen[best]);
     }
     int refined_map = 0;
     Map37Cache refined_map_cache;
@@ -6129,7 +9287,8 @@ static int stream_encode_strided_base(
                         &rlen[best]);
         }
     }
-    if (best >= 0 && c.ch == 3 && color && npix >= 250000u &&
+    if (weighted_mode54_encoder_enabled() &&
+        best >= 0 && c.ch == 3 && color && npix >= 250000u &&
         npix <= 500000u && rlen[best] > STREAM_HDR &&
         res[best][14] == 53 && res[best][15] >= 32 &&
         res[best][15] <= 35) {
@@ -6163,6 +9322,84 @@ static int stream_encode_strided_base(
                     WEIGHTED_MIN_GAIN_BPS, 256u, &res[best], &rlen[best]);
         }
     }
+    /* Large color streams normally favor the ordinary transform, but three
+       measured disagreements gate one sampled-specialist retry: the broad
+       transform-5 pocket, transform 29 beside ordinary 9/10, and transform
+       31 beside ordinary transform 2. The current size is the cutoff,
+       so a miss changes only encode work and never the selected bytes. */
+    if (best >= 0 && color && rlen[best] > STREAM_HDR &&
+        res[best][14] == 52) {
+        int final_transform = res[best][15];
+        int sampled_transform = base[0][0];
+        int retry_specialist =
+            (final_transform == 5 && sampled_transform != 5) ||
+            (sampled_transform == 29 && final_transform >= 9 &&
+             final_transform <= 10) ||
+            (sampled_transform == 31 && final_transform == 2);
+        if (retry_specialist) {
+            int adapt = res[best][17];
+            if (adapt != ADAPT_FAST && adapt != ADAPT_SLOW)
+                adapt = ADAPT_DEFAULT;
+            try_improve(&c, 52, sampled_transform, res[best][16], adapt,
+                        &res[best], &rlen[best]);
+        }
+    }
+    /* Mode 53's richer mixture is not universally smaller. On completed
+       streams through one megapixel, one same-shape mode-52 fallback recovers
+       a measured 38-file pocket and is about two percent faster to decode.
+       Reuse the exact map context that produced mode 53 and keep its completed
+       byte count as the hard limit; a miss changes encode work only. */
+    if (best >= 0 && color && npix <= 1000000u &&
+        rlen[best] > STREAM_HDR && res[best][14] == 53) {
+        int transform = res[best][15];
+        int tile_log = res[best][16];
+        int adapt = res[best][17];
+        if (adapt != ADAPT_FAST && adapt != ADAPT_SLOW)
+            adapt = ADAPT_DEFAULT;
+        EncCtx fallback = c;
+        if (refined_map) {
+            fallback.map37_cache = &refined_map_cache;
+            fallback.map37_override = 1;
+            fallback.map37_penalty[0] = 4;
+            fallback.map37_penalty[1] = 2;
+            fallback.map37_penalty[2] = 2;
+        }
+        try_improve(&fallback, 52, transform, tile_log, adapt,
+                    &res[best], &rlen[best]);
+    }
+    /* The old large-image route always chose 8 by 8 mode-52 tiles.  Some
+       large natural images are materially smaller at 16 by 16, while UI
+       images can prefer the original size.  Retry the one adjacent existing
+       shape only after mode 52 wins, and retain the completed stream as the
+       hard byte cutoff.  This adds no syntax or decoder work and cannot make
+       a selected file larger. */
+    if (best >= 0 && color && npix > 1000000u &&
+        rlen[best] > STREAM_HDR && res[best][14] == 52 &&
+        res[best][16] == 3) {
+        int transform = res[best][15];
+        int adapt = res[best][17];
+        if (adapt != ADAPT_FAST && adapt != ADAPT_SLOW)
+            adapt = ADAPT_DEFAULT;
+        try_improve(&c, 52, transform, 4, adapt,
+                    &res[best], &rlen[best]);
+    }
+    /* The remaining grayscale mode-37 tile-3 streams have a low-cost measured
+       tile-4 pocket. The completed tile-3 stream is the byte cutoff, so the
+       retry can improve size and decode locality without a new mode, signal,
+       or per-file regression. */
+    if (best >= 0 && c.ch == 1 && rlen[best] > STREAM_HDR &&
+        res[best][14] == 37 && res[best][16] == 3) {
+        int adapt = res[best][17];
+        if (adapt != ADAPT_FAST && adapt != ADAPT_SLOW)
+            adapt = ADAPT_DEFAULT;
+        try_improve(&c, 37, 0, 4, adapt, &res[best], &rlen[best]);
+    }
+#ifdef QLIC_STREAM_TRACE
+    if (best >= 0)
+        trace_adaptation_candidates(
+            &c, res[best], rlen[best], fast_transform_score,
+            fast_transform_samples, "tournament");
+#endif
     free_map37_cache(&refined_map_cache);
     int err = STREAM_OK;
     if (best < 0) err = rerr[0];
@@ -6242,7 +9479,7 @@ int stream_encode_strided_threads(
             size_t candidate_size = 0;
             int candidate_err = stream_encode_strided_base(
                 compact, w, h, channels, (size_t)channels, search, threads,
-                sample_bits, SIZE_MAX, &candidate, &candidate_size);
+                sample_bits, SIZE_MAX, NULL, &candidate, &candidate_size);
             free(compact);
             if (candidate_err == STREAM_OK && candidate_size >= STREAM_HDR &&
                 candidate[14] != 42) {
@@ -6265,7 +9502,8 @@ int stream_encode_strided_threads(
                 size_t original_size = 0;
                 int original_err = stream_encode_strided_base(
                     pix, w, h, channels, pixel_stride, search, threads,
-                    sample_bits, candidate_size, &original, &original_size);
+                    sample_bits, candidate_size, NULL, &original,
+                    &original_size);
                 if (original_err == STREAM_OK) {
                     if (original_size < candidate_size) {
                         free(candidate);
@@ -6292,8 +9530,100 @@ int stream_encode_strided_threads(
     }
     return stream_encode_strided_base(
         pix, w, h, channels, pixel_stride, search, threads, sample_bits,
-        SIZE_MAX, out, outn);
+        SIZE_MAX, NULL, out, outn);
 }
+
+#ifdef QLIC_BENCHMARK_TRIAL
+int stream_benchmark_transform_scores(
+    const uint8_t *pix, uint32_t w, uint32_t h, int channels,
+    int candidate_transform,
+    uint64_t *current_score, uint64_t *candidate_score,
+    uint64_t *sample_count) {
+    if (!pix || !w || !h || channels < 3 || channels > 4 ||
+        candidate_transform < 38 ||
+        candidate_transform >= QLIC_TRANSFORM_COUNT ||
+        !current_score || !candidate_score || !sample_count)
+        return STREAM_E_ARG;
+    EncCtx context;
+    memset(&context, 0, sizeof(context));
+    context.pix = pix;
+    context.w = w;
+    context.h = h;
+    context.ch = channels;
+    context.stride = (size_t)channels;
+    uint64_t cost[QLIC_TRANSFORM_COUNT];
+    ranked_transform_scores(&context, cost, 1);
+    uint64_t best = cost[0];
+    for (int transform = 1; transform < 38; ++transform)
+        if (cost[transform] < best) best = cost[transform];
+    if (candidate_transform > 38 && cost[38] < best)
+        best = cost[38];
+    uint32_t xs = w > 192u ? (w + 191u) / 192u : 1u;
+    uint32_t ys = h > 128u ? (h + 127u) / 128u : 1u;
+    *current_score = best;
+    *candidate_score = cost[candidate_transform];
+    *sample_count =
+        (uint64_t)((w + xs - 1u) / xs) * ((h + ys - 1u) / ys);
+    return STREAM_OK;
+}
+
+int stream_benchmark_encode_trial(
+    const uint8_t *pix, uint32_t w, uint32_t h, int channels,
+    int mode, int transform, int tile_log, int adaptation,
+    uint8_t **out, size_t *outn) {
+    if (mode != 37 && mode != 41 && mode != 45 && mode != 52 &&
+        mode != 53 && mode != 54)
+        return STREAM_E_ARG;
+    if (transform < 0 || transform >= QLIC_TRANSFORM_COUNT ||
+        tile_log < 0 || tile_log > 7 ||
+        (adaptation != ADAPT_FAST && adaptation != ADAPT_DEFAULT &&
+         adaptation != ADAPT_SLOW))
+        return STREAM_E_ARG;
+    TrialSpec trial = {
+        (uint8_t)mode, (uint8_t)transform, (uint8_t)tile_log,
+        (uint8_t)adaptation, 0
+    };
+    size_t npix = 0;
+    if (!dims_ok(w, h, channels, &npix, NULL)) return STREAM_E_DIM;
+    int sample_bits = common_sample_grid(
+        pix, npix, channels, (size_t)channels);
+    if (!sample_bits)
+        return stream_encode_strided_base(
+            pix, w, h, channels, (size_t)channels, 0, 1, 0, SIZE_MAX,
+            &trial, out, outn);
+
+    size_t compact_size = npix * (size_t)channels;
+    uint8_t *compact = malloc(compact_size);
+    if (!compact) return STREAM_E_ALLOC;
+    for (size_t i = 0; i < npix; ++i) {
+        const uint8_t *source = pix + i * (size_t)channels;
+        uint8_t *target = compact + i * (size_t)channels;
+        target[0] = compact_sample(source[0], sample_bits);
+        if (channels >= 3) {
+            target[1] = compact_sample(source[1], sample_bits);
+            target[2] = compact_sample(source[2], sample_bits);
+        }
+        if (channels == 4) target[3] = source[3];
+    }
+    int result = stream_encode_strided_base(
+        compact, w, h, channels, (size_t)channels, 0, 1, sample_bits,
+        SIZE_MAX, &trial, out, outn);
+    free(compact);
+    if (result != STREAM_OK) return result;
+    if (!*out || *outn < STREAM_HDR) {
+        stream_free(*out);
+        *out = NULL;
+        *outn = 0;
+        return STREAM_E_CORRUPT;
+    }
+    (*out)[13] |= (uint8_t)(sample_bits << 2);
+    put32(*out + 18, stream_crc32_pixels(
+        pix, npix, (size_t)channels, (size_t)channels));
+    put32(*out + 26, 0);
+    put32(*out + 26, container_crc32(*out, *outn));
+    return STREAM_OK;
+}
+#endif
 
 int stream_encode_threads(const uint8_t *pix, uint32_t w, uint32_t h,
                           int channels, int search, unsigned threads,
@@ -6312,12 +9642,14 @@ static int stream_parse_info(const uint8_t *data, size_t n,
     memset(info, 0, sizeof(*info));
     if (!data) return STREAM_E_ARG;
     if (n < STREAM_HDR || memcmp(data, "QST1", 4)) return STREAM_E_FORMAT;
+    if (get32(data + 26) != container_crc32(data, n))
+        return STREAM_E_CORRUPT;
     uint32_t w = get32(data + 4), h = get32(data + 8);
     int ch = data[12], flags = data[13], mode = data[14], t = data[15], tlog = data[16];
     uint8_t aval = data[17];
     uint32_t crc = get32(data + 18), plen = get32(data + 22);
     if ((ch != 1 && ch != 3 && ch != 4) || (flags & ~31) ||
-        !zmode_valid(mode) || t > 35 || tlog > 7)
+        !zmode_valid(mode) || t >= QLIC_TRANSFORM_COUNT || tlog > 7)
         return STREAM_E_FORMAT;
     if ((expected_w && w != expected_w) ||
         (expected_h && h != expected_h) ||
@@ -6335,7 +9667,6 @@ static int stream_parse_info(const uint8_t *data, size_t n,
     if (mode != 1 && (ch == 1 || gray) && t != 0) return STREAM_E_FORMAT;
     if ((mode == 38 || mode == 39) && tlog != 0) return STREAM_E_FORMAT;
     if (mode == 40 && tlog != 1) return STREAM_E_FORMAT;
-
     size_t off = STREAM_HDR, pal_n = 0;
     int adapt = ADAPT_DEFAULT;
     if (!calpha) {
@@ -6392,19 +9723,27 @@ static int stream_decode_impl(const uint8_t *data, size_t n,
                               int rgba,
                               uint32_t expected_w, uint32_t expected_h,
                               int expected_ch,
+                              uint8_t *provided, size_t provided_size,
                               uint8_t **pixout, uint32_t *pw, uint32_t *ph,
                               int *pch) {
     if (pixout) *pixout = NULL;
     if (pw) *pw = 0;
     if (ph) *ph = 0;
     if (pch) *pch = 0;
-    if (!data || !pixout || !pw || !ph || !pch) return STREAM_E_ARG;
+    if (!data || !pixout || !pw || !ph || !pch || (provided && !rgba))
+        return STREAM_E_ARG;
     StreamInfo info;
     size_t npix = 0, nbytes = 0, off = 0;
     int result = stream_parse_info(
         data, n, expected_w, expected_h, expected_ch, &info,
         &npix, &nbytes, &off);
     if (result != STREAM_OK) return result;
+#ifdef QLIC_STREAM_TRACE
+    const char *decode_trace_value = getenv("QLIC_TRACE_DECODE");
+    int decode_trace = decode_trace_value && decode_trace_value[0] &&
+                       decode_trace_value[0] != '0';
+    double decode_begin = decode_trace ? stream_trace_now() : 0.0;
+#endif
     uint32_t w = info.width, h = info.height;
     int ch = info.channels, flags = info.flags, mode = info.mode;
     int t = info.transform, tlog = info.tile_log;
@@ -6414,7 +9753,7 @@ static int stream_decode_impl(const uint8_t *data, size_t n,
     int gray = flags & 1, calpha = (flags >> 1) & 1;
     int adapt = info.adaptation;
     int sample_bits = info.sample_bits;
-    int local_mode = mode >= 44 && mode <= 54;
+    int local_mode = mode == 45 || mode_has_local_state(mode);
     uint8_t pal[256][4];
     if (mode == 1)
         for (size_t i = 0; i < pal_n; i++)
@@ -6424,7 +9763,7 @@ static int stream_decode_impl(const uint8_t *data, size_t n,
             split37_stream_decode(data + off, plen, w, h, ch, gray, calpha,
                                   aval, t, tlog, crc, pixout, pw, ph, pch);
         if (result != STREAM_OK || !rgba || ch == 4)
-            return result;
+            goto split_done;
         if (npix > SIZE_MAX / 4u) {
             free(*pixout);
             *pixout = NULL;
@@ -6453,15 +9792,32 @@ static int stream_decode_impl(const uint8_t *data, size_t n,
         free(*pixout);
         *pixout = expanded;
         *pch = 4;
-        return STREAM_OK;
+split_done:
+        if (result == STREAM_OK && provided) {
+            if (provided_size < npix * 4u) {
+                free(*pixout);
+                *pixout = NULL;
+                return STREAM_E_ARG;
+            }
+            memcpy(provided, *pixout, npix * 4u);
+            free(*pixout);
+            *pixout = provided;
+        }
+        return result;
     }
 
     Dec d; dec_init(&d, data + off, plen, adapt);
     size_t output_stride = rgba && ch != 4 ? 4u : sch;
     size_t pixel_capacity = npix * output_stride;
-    uint8_t  *pix = malloc(pixel_capacity);
+    if (provided && provided_size < pixel_capacity) return STREAM_E_ARG;
+    int owns_pix = provided == NULL;
+    uint8_t  *pix = provided ? provided : malloc(pixel_capacity);
     uint16_t *P   = malloc(npix * sizeof(uint16_t));
-    if (!pix || !P) { free(pix); free(P); return STREAM_E_ALLOC; }
+    if (!pix || !P) {
+        if (owns_pix) free(pix);
+        free(P);
+        return STREAM_E_ALLOC;
+    }
     int err = STREAM_OK;
 
     if (mode == 1) {
@@ -6492,28 +9848,68 @@ static int stream_decode_impl(const uint8_t *data, size_t n,
     } else {
         uint16_t *Q = malloc(npix * sizeof(uint16_t));
         uint16_t *R = (uint16_t *)pix;
-        if (!Q) { free(pix); free(P); return STREAM_E_ALLOC; }
+        if (!Q) {
+            if (owns_pix) free(pix);
+            free(P);
+            return STREAM_E_ALLOC;
+        }
         uint16_t *pls[3] = {P, Q, R};
-        int depth[3] = {8, t ? 9 : 8, t ? 9 : 8};
-        uint8_t *state =
-            mode == 43 || local_mode ? pix + npix * sizeof(uint16_t) : NULL;
+        int depth[3] = {transform_plane_depth(t, 0),
+                        transform_plane_depth(t, 1),
+                        transform_plane_depth(t, 2)};
+        uint8_t *state = mode == 43 || local_mode
+                             ? pix + npix * sizeof(uint16_t)
+                             : NULL;
         for (int p = 0; p < 3 && err == STREAM_OK; p++) {
+#ifdef QLIC_STREAM_TRACE
+            double plane_begin = decode_trace ? stream_trace_now() : 0.0;
+#endif
             err = decode_mode_plane(
                 &d, pls[p], w, h, depth[p], mode, tlog, p,
                 p == 0 || (local_mode && p == 1) ? state : NULL,
                 p ? state : NULL);
+#ifdef QLIC_STREAM_TRACE
+            if (decode_trace)
+                fprintf(stderr,
+                        "decode-phase name=plane index=%d mode=%d transform=%d "
+                        "pixels=%zu seconds=%.9f err=%d\n",
+                        p, mode, t, npix, stream_trace_now() - plane_begin,
+                        err);
+#endif
         }
-        if (err == STREAM_OK)
+        if (err == STREAM_OK) {
+#ifdef QLIC_STREAM_TRACE
+            double transform_begin = decode_trace ? stream_trace_now() : 0.0;
+#endif
             inv_transform_reverse(pls, npix, (int)output_stride, t, pix,
                                   rgba && ch == 3);
+#ifdef QLIC_STREAM_TRACE
+            if (decode_trace)
+                fprintf(stderr,
+                        "decode-phase name=inverse-transform mode=%d "
+                        "transform=%d pixels=%zu seconds=%.9f err=0\n",
+                        mode, t, npix,
+                        stream_trace_now() - transform_begin);
+#endif
+        }
         free(Q);
     }
     if (mode != 1 && ch == 4 && err == STREAM_OK) {
         if (calpha) for (size_t i = 0; i < npix; i++) pix[i*4 + 3] = aval;
         else {
+#ifdef QLIC_STREAM_TRACE
+            double alpha_begin = decode_trace ? stream_trace_now() : 0.0;
+#endif
             err = decode_mode_plane(&d, P, w, h, 8, mode, tlog, 3, NULL,
                                     NULL);
             if (err == STREAM_OK) for (size_t i = 0; i < npix; i++) pix[i*4 + 3] = (uint8_t)P[i];
+#ifdef QLIC_STREAM_TRACE
+            if (decode_trace)
+                fprintf(stderr,
+                        "decode-phase name=plane index=3 mode=%d transform=%d "
+                        "pixels=%zu seconds=%.9f err=%d\n",
+                        mode, t, npix, stream_trace_now() - alpha_begin, err);
+#endif
         }
     }
     if (err == STREAM_OK && sample_bits)
@@ -6524,16 +9920,36 @@ static int stream_decode_impl(const uint8_t *data, size_t n,
     if (err == STREAM_OK && d.truncated) err = STREAM_E_CORRUPT;
     uint32_t decoded_crc = 0;
     if (err == STREAM_OK) {
+#ifdef QLIC_STREAM_TRACE
+        double crc_begin = decode_trace ? stream_trace_now() : 0.0;
+#endif
         if (rgba && ch == 3)
             decoded_crc = stream_crc32_rgbx(pix, npix);
         else if (rgba && ch == 1)
             decoded_crc = stream_crc32_grayx(pix, npix);
         else
             decoded_crc = stream_crc32(pix, nbytes);
-        /* this catches predictor or inverse transform errors after entropy decoding */
+#ifdef QLIC_STREAM_TRACE
+        if (decode_trace)
+            fprintf(stderr,
+                    "decode-phase name=checksum mode=%d transform=%d "
+                    "pixels=%zu seconds=%.9f err=0\n",
+                    mode, t, npix, stream_trace_now() - crc_begin);
+#endif
+        /* Detect post-entropy predictor and inverse-transform errors. */
         if (decoded_crc != crc) err = STREAM_E_CORRUPT;
     }
-    if (err != STREAM_OK) { free(pix); return err; }
+    if (err != STREAM_OK) {
+        if (owns_pix) free(pix);
+        return err;
+    }
+#ifdef QLIC_STREAM_TRACE
+    if (decode_trace)
+        fprintf(stderr,
+                "decode-phase name=total mode=%d transform=%d pixels=%zu "
+                "seconds=%.9f err=0\n",
+                mode, t, npix, stream_trace_now() - decode_begin);
+#endif
     *pixout = pix; *pw = w; *ph = h; *pch = rgba ? 4 : ch;
     return STREAM_OK;
 }
@@ -6543,14 +9959,23 @@ int stream_decode_trusted_expected(const uint8_t *data, size_t n,
                                    int expected_ch, uint8_t **pixout,
                                    uint32_t *pw, uint32_t *ph, int *pch) {
     return stream_decode_impl(data, n, 0, expected_w, expected_h, expected_ch,
-                              pixout, pw, ph, pch);
+                              NULL, 0, pixout, pw, ph, pch);
 }
 
 int stream_decode_trusted_expected_rgba(
     const uint8_t *data, size_t n, uint32_t expected_w, uint32_t expected_h,
     int expected_ch, uint8_t **pixout, uint32_t *pw, uint32_t *ph, int *pch) {
     return stream_decode_impl(data, n, 1, expected_w, expected_h, expected_ch,
-                              pixout, pw, ph, pch);
+                              NULL, 0, pixout, pw, ph, pch);
+}
+
+int stream_decode_trusted_expected_rgba_into(
+    const uint8_t *data, size_t n, uint32_t expected_w, uint32_t expected_h,
+    int expected_ch, uint8_t *pixels, size_t pixels_size,
+    uint32_t *pw, uint32_t *ph, int *pch) {
+    uint8_t *decoded = NULL;
+    return stream_decode_impl(data, n, 1, expected_w, expected_h, expected_ch,
+                              pixels, pixels_size, &decoded, pw, ph, pch);
 }
 
 int stream_decode_trusted_expected_threads(

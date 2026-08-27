@@ -1,116 +1,153 @@
-# Independent benchmarks based on DIV2K, CLIC 2022, QOI, and Enrico
+# QLIC
 
-3,167 images, 1,964,362,720 pixels, one logical processor, and decoded pixel comparison.
+Quick Lossless Image Codec.
 
-| Codec | Settings | Total size | Encode time | Peak memory |
-| --- | --- | ---: | ---: | ---: |
-| QLIC 0.5.0 | 1 thread | 1,172,509,205 bytes | 561.743 s | 217.5 MiB |
-| WebP 1.6.0 | lossless, exact, effort 6 | 1,289,518,274 bytes | 544.911 s | 431.7 MiB |
-| JPEG XL 0.12.0 | lossless, effort 9 | 1,164,424,898 bytes | 5,286.575 s | 341.9 MiB |
+QLIC stores still images, RGBA animation, and unsigned 8--24-bit integer
+samples losslessly. QSW2 carries ICC, CICP, alpha, and photographic metadata.
+QLIC does not tone-map or infer HDR. The encoder has one automatic policy; it
+has no effort or quality setting.
 
-QLIC was 9.074 percent smaller than WebP 6 and 0.694 percent larger than JPEG XL 9. It encoded 9.411 times faster than JPEG XL 9 and 3.089 percent slower than WebP 6. Every output decoded to the exact source pixels.
+This is the only QLIC 1.0 source tree.
 
-[Benchmark record](docs/benchmark.json)
+Try the [web demo](https://qlic.pages.dev/).
 
-The same corpus was used for a separate JPEG XL effort sweep.
+## Components
 
-| Codec | Settings | Total size | Encode time | Decode time |
-| --- | --- | ---: | ---: | ---: |
-| QLIC 0.5.0 | 1 thread | 1,172,509,205 bytes | 573.480 s | 314.416 s |
-| JPEG XL 0.12.0 | lossless, effort 6 | 1,214,206,451 bytes | 754.620 s | 297.093 s |
-| JPEG XL 0.12.0 | lossless, effort 7 | 1,187,851,480 bytes | 1,087.755 s | 309.095 s |
-| JPEG XL 0.12.0 | lossless, effort 8 | 1,171,971,513 bytes | 2,977.934 s | 314.935 s |
-
-QLIC was 3.434 percent smaller than JPEG XL 6, 1.292 percent smaller than JPEG XL 7, and 0.046 percent larger than JPEG XL 8. It encoded 5.193 times faster than JPEG XL 8. Decode time includes startup, file IO, and PNG output.
-
-A practical PNG run used OxiPNG 10.1.1 at level 2. QLIC produced 1,172,509,205 bytes in 586.392 seconds. OxiPNG produced 1,629,681,431 bytes in 958.226 seconds. QLIC was 28.053 percent smaller and encoded 1.634 times faster. The separate in-memory decode test took 172.676 seconds for QLIC and 11.757 seconds for PNG.
-
-[Full benchmark results](benchmark/RESULTS.md)
-
-# QLIC 0.5 Demo
-
-QLIC is a lossless still image and RGBA animation codec. The codec, C SDK, and command line tool run on Windows and Linux. The browser demo encodes still images and decodes the same QLIC files. Windows also includes a desktop demo and WIC decoder.
-
-This release is built to show and test QLIC. This is not necessarily a production release.
-
-## Layout
-
-codec contains the implementation and public C header.
-
-benchmark contains the reproducible benchmark.
-
-third_party contains external headers and license records.
-
-scripts contains the secondary build, package, and Windows integration commands.
+| Need | Use |
+| --- | --- |
+| Windows app | `qlic-gui.exe` |
+| Pack, unpack, inspect, or verify | `qlic` |
+| C or C++ | C SDK and [SDK guide](docs/sdk.md) |
+| Safe Rust decode | [Rust decoder](rust/qlic-decoder) |
+| Browser or JavaScript | [WebAssembly package](web/README.md) |
+| Explorer, WIC apps, 8/16-bit, and HDR10 decode | [WIC decoder](packaging/README-wic.md) |
 
 ## Build
 
-Windows requires CMake 3.25 or newer and Visual Studio 2022 or newer with the C++ workload.
+Windows requires CMake 3.25 or newer and Visual Studio 2022 or newer.
 
 ```powershell
 .\build.ps1
+.\scripts\build-rust.ps1
+.\scripts\build-web.ps1
 ```
 
-LLVM is also required for the Clang and WebAssembly builds.
+WebAssembly also requires LLVM and Node.js.
 
 On Debian or Ubuntu:
 
 ```sh
-sudo apt install build-essential cmake ninja-build pkg-config libpng-dev libwebp-dev libjxl-dev libavif-dev libtiff-dev libwim-dev
+sudo apt install build-essential cmake ninja-build pkg-config \
+  libpng-dev libwebp-dev libjxl-dev libavif-dev libtiff-dev libwim-dev
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build
+ctest --test-dir build --output-on-failure
 ```
 
-PNG is required by the default Linux build. WebP, JPEG XL, AVIF, TIFF, and wimlib support is enabled when their development packages are available. Wimlib supplies the Linux LZMS encoder, while QLIC uses its own decoder.
+To build libraries and tests without importers or LZMS encoding:
 
-Set `QLIC_LINUX_LZMS=ON` to require wimlib or `QLIC_LINUX_LZMS=OFF` to disable it. For a decoder or SDK build without image libraries, set `QLIC_BUILD_CLI=OFF`.
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DQLIC_BUILD_CLI=OFF -DQLIC_LINUX_LZMS=OFF
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
 
-## CLI
+## Command line
 
 ```text
 qlic pack input.png output.qlic
 qlic unpack input.qlic output.png
-qlic info input.qlic
-qlic batch output-directory image1.png image2.webp image3.jxl
+qlic info input.qlic --json
+qlic verify input.qlic
 ```
 
-The default is one thread. Use `--threads all` or `--threads N` when more are wanted. Every QLIC file created by this release decodes with the browser build.
+Use `--threads N` or `--threads all` to set CPU use. `verify` fully decodes and
+checks a file without writing an image.
 
-Input supports PNG, lossless WebP, lossless JPEG XL, TIFF, and BMP on Windows and Linux. Lossless AVIF is built in on Linux and uses an installed WIC decoder on Windows. Windows also accepts GIF through WIC. JPEG and inputs known to be lossy are rejected. QLIC currently accepts up to 8 bits per channel.
+## Color and metadata
 
-Linux and Windows both test the optional LZMS outer stage and keep it only when it makes the file smaller. Both forms decode on Windows, Linux, and in the browser.
+The Windows CLI accepts:
 
-## GUI
+```text
+qlic pack input.png output.qlic --color-profile srgb
+qlic pack input.png output.qlic --icc display.icc --alpha straight
+qlic pack input.tif output.qlic --xmp edit.xmp --exif camera.exif
+```
 
-Drop or choose an image, compress it, and see the percentage saved. The original file stays untouched until the QLIC result is saved.
+These options store integer samples without tone mapping. QLIC preserves
+ordered opaque metadata blocks byte-for-byte. Source adapters import supported
+ICC, EXIF, XMP, IPTC, and JUMBF records. A neighboring `input.xmp` Lightroom
+sidecar is discovered automatically. Explicit metadata options handle records
+the source adapter cannot expose.
 
-## SDK
+`--color-profile rec2100-pq` and `rec2100-hlg` store full-range BT.2020 RGB
+with the standard PQ (CICP 16) or HLG (CICP 18) transfer identifier. The
+cross-platform C SDK exposes the same descriptors through `qlic_encode_hdr`.
+Both paths preserve the original integer code values; display rendering belongs
+to the viewer or calling application.
 
-The public header is `codec/include/qlic/qlic.h`.
+On Windows, PNG output embeds valid EXIF, XMP, JUMBF, and physical-resolution
+chunks. TIFF output carries ICC, XMP, IPTC, JUMBF, DPI, orientation, and alpha
+association. Exact sidecars are also written, including duplicate or
+destination-incompatible records. Premultiplied samples export only to
+associated-alpha TIFF; PNG export fails instead of changing the samples.
+
+Windows and Linux import PNG, lossless WebP, lossless JPEG XL, TIFF, and BMP
+when their loaders are present. Linux also imports lossless AVIF. Windows can
+use installed WIC decoders. Lossy input is rejected.
+
+## C library
 
 ```cmake
-find_package(qlic 0.5 CONFIG REQUIRED)
+find_package(qlic 1.0 CONFIG REQUIRED)
 target_link_libraries(app PRIVATE qlic::qlic_static)
 ```
 
-Use `qlic::qlic` for the DLL. See [docs/sdk.md](docs/sdk.md).
+Use `qlic::qlic` for the shared library. The public header is
+`codec/include/qlic/qlic.h`. See the [SDK guide](docs/sdk.md) for ownership,
+limits, and public entry points.
 
-## WIC
+## Rust and WebAssembly
 
-```powershell
-.\scripts\install-wic.ps1
-.\scripts\uninstall-wic.ps1
-```
+The Rust decoder has no dependencies or C/FFI and forbids unsafe code. The Web
+package is a static ES module and Wasm binary; it needs no QLIC executable or
+local service. Both reject unsupported syntax and do not reduce wide or HDR
+data to RGBA8. See the [Rust](rust/qlic-decoder) and
+[WebAssembly](web/README.md) guides.
 
-Both scripts default to the current user. Pass `-Scope Machine` from an elevated PowerShell for a system-wide install.
+## Limits
 
-## Package
+The decoder supports validated RGBA8 rows and exact rectangular output with
+progress and cancellation. QST1 regions still require complete entropy
+reconstruction; the region API bounds destination memory but is not random
+access. QLIC 1.0 has no incremental input decoder, float/half HDR, RAW
+development, gain-map interpretation, or Rust encoder. Its HDR contract is
+exact unsigned 8--24-bit code values with explicit ICC or CICP meaning,
+including retained PQ and HLG conformance fixtures.
 
-```powershell
-.\scripts\package.ps1
-```
+Pin deployed decoders and keep a common interchange format where QLIC is not
+available.
 
-Release archives and SHA256 checksums are written to `dist`.
+## Evidence
 
-Apache 2.0.
+The retained release corpus and every comparison setting are recorded in
+[benchmark-current.md](docs/benchmark-current.md). Results are corpus-specific,
+and every encoded output is decoded and compared with its source. See
+[architecture.md](docs/architecture.md) for design, qualification, and known
+limits.
+
+Other references: [profiles](docs/profiles.md), [file format](docs/format.md),
+and [support](SUPPORT.md).
+
+## Packages
+
+Build the seven local packages with `.\scripts\package.ps1`. Output goes to
+`dist` with checksums and SPDX SBOMs.
+
+Stage a verified unsigned public release candidate with
+`.\scripts\stage-community-release.ps1`. It writes the exact upload set under
+`release` without committing, tagging, signing, or publishing anything. See
+[community-release.md](docs/community-release.md).
+
+Apache-2.0. The Rust LZMS port also retains its source MIT license.

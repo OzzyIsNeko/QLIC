@@ -16,7 +16,10 @@
 #define QLIC_DEFAULT_MAX_PAYLOAD_BYTES UINT64_C(536870912)
 #define QLIC_DEFAULT_MAX_PIXELS UINT64_C(67108864)
 #define QLIC_DEFAULT_MAX_ANIMATION_BYTES UINT64_C(536870912)
+#define QLIC_DEFAULT_MAX_DECODED_BYTES UINT64_C(536870912)
+#define QLIC_DEFAULT_MAX_METADATA_BYTES UINT64_C(16777216)
 #define QLIC_DEFAULT_MAX_FRAMES 100000u
+#define QLIC_DEFAULT_MAX_CHUNKS 256u
 
 /* mode numbers are stored in the file format, do not reorder them */
 enum {
@@ -37,7 +40,9 @@ enum {
   MODE_TILE_MODEL = 15,
   MODE_GMODEL = 16,
   MODE_ANIM = 17,
-  MODE_BLOCKS = 18
+  MODE_BLOCKS = 18,
+  MODE_NATIVE_WIDE = 19,
+  MODE_HDR_WIDE = 20
 };
 
 enum {
@@ -51,7 +56,10 @@ enum {
   TRANSFORM_SEPARABLE_DELTA = 7,
   TRANSFORM_RDELTA = 8,
   TRANSFORM_BDELTA = 9,
-  TRANSFORM_CPAL_DELTA = 10
+  TRANSFORM_CPAL_DELTA = 10,
+  TRANSFORM_BDELTA_PLANAR_MED = 11,
+  TRANSFORM_CPAL_TILES = 12,
+  TRANSFORM_CPAL_PLANAR = 13
 };
 
 enum {
@@ -72,6 +80,66 @@ typedef struct {
   uint32_t height;
   uint8_t *rgba;
 } Image;
+
+typedef struct {
+  uint32_t width;
+  uint32_t height;
+  uint32_t channels;
+  uint32_t bits_per_sample;
+  void *pixels;
+  size_t pixels_size;
+  size_t stride;
+} WideImage;
+
+typedef struct {
+  uint8_t tag[4];
+  uint32_t reserved;
+  uint8_t *data;
+  size_t size;
+} HdrMetadataBlock;
+
+typedef struct {
+  WideImage wide;
+  uint32_t sample_type;
+  uint32_t alpha_mode;
+  uint32_t color_authority;
+  uint8_t *icc;
+  size_t icc_size;
+  uint32_t has_cicp;
+  uint16_t color_primaries;
+  uint16_t transfer_characteristics;
+  uint16_t matrix_coefficients;
+  uint8_t full_range;
+  uint32_t has_mastering_display;
+  uint16_t primary_x[3];
+  uint16_t primary_y[3];
+  uint16_t white_x;
+  uint16_t white_y;
+  uint32_t max_luminance;
+  uint32_t min_luminance;
+  uint32_t has_content_light;
+  uint16_t max_cll;
+  uint16_t max_fall;
+  HdrMetadataBlock *metadata;
+  uint32_t metadata_count;
+} HdrImage;
+
+typedef struct {
+  uint32_t channels;
+  uint32_t bits_per_sample;
+  uint32_t sample_type;
+  uint32_t alpha_mode;
+  uint32_t color_authority;
+  uint32_t has_icc;
+  uint32_t has_cicp;
+  uint16_t color_primaries;
+  uint16_t transfer_characteristics;
+  uint16_t matrix_coefficients;
+  uint8_t full_range;
+  uint32_t has_mastering_display;
+  uint32_t has_content_light;
+  uint32_t metadata_count;
+} HdrInfo;
 
 typedef struct {
   Image image;
@@ -103,7 +171,10 @@ typedef struct {
   uint64_t max_payload_bytes;
   uint64_t max_pixels;
   uint64_t max_animation_bytes;
+  uint64_t max_decoded_bytes;
+  uint64_t max_metadata_bytes;
   uint32_t max_frames;
+  uint32_t max_chunks;
 } QlicDecodeLimits;
 
 typedef struct {
@@ -125,7 +196,9 @@ typedef enum {
   QLIC_CORE_BAD_ARGUMENT,
   QLIC_CORE_OUT_OF_MEMORY,
   QLIC_CORE_BAD_DATA,
-  QLIC_CORE_LIMIT_EXCEEDED
+  QLIC_CORE_LIMIT_EXCEEDED,
+  QLIC_CORE_UNSUPPORTED_FORMAT,
+  QLIC_CORE_CANCELLED
 } QlicCoreStatus;
 
 const char *qlic_core_error(void);
@@ -135,6 +208,8 @@ void set_err(const char *fmt, ...);
 void set_err_status(QlicCoreStatus status, const char *fmt, ...);
 void buf_free(Buf *b);
 void image_free(Image *im);
+void wide_image_free(WideImage *im);
+void hdr_image_free(HdrImage *im);
 void anim_free(Anim *a);
 void candidate_free(Candidate *c);
 void qlic_core_default_limits(QlicDecodeLimits *limits);
@@ -149,12 +224,30 @@ int dec_qlic(const uint8_t *data, size_t size, Image *out,
 int dec_qlic_limited(const uint8_t *data, size_t size, Image *out,
                      QlicHeader *header_out,
                      const QlicDecodeLimits *limits);
+int dec_qlic_rgba_into_limited(const uint8_t *data, size_t size,
+                               uint8_t *rgba, size_t rgba_size,
+                               size_t stride, uint32_t *width,
+                               uint32_t *height,
+                               const QlicDecodeLimits *limits);
 int dec_any_qlic(const uint8_t *data, size_t size, Anim *out,
                  QlicHeader *header_out);
 int dec_any_qlic_limited(const uint8_t *data, size_t size, Anim *out,
                          QlicHeader *header_out,
                          const QlicDecodeLimits *limits);
 int enc_mem(const Image *im, Buf *file, Candidate *chosen);
+int enc_wide_mem(const void *pixels, size_t pixels_size, uint32_t width,
+                 uint32_t height, size_t stride, uint32_t channels,
+                 uint32_t bits_per_sample, Buf *file);
+int dec_wide_qlic_limited(const uint8_t *data, size_t size, WideImage *out,
+                           QlicHeader *header_out,
+                           const QlicDecodeLimits *limits);
+int enc_hdr_mem(const HdrImage *image, Buf *file);
+int dec_hdr_qlic_limited(const uint8_t *data, size_t size, HdrImage *out,
+                         QlicHeader *header_out,
+                         const QlicDecodeLimits *limits);
+int hdr_qlic_info_limited(const uint8_t *data, size_t size, HdrInfo *out,
+                          QlicHeader *header_out,
+                          const QlicDecodeLimits *limits);
 int enc_anim_mem(const Anim *anim, Buf *file, Candidate *chosen);
 
 #endif

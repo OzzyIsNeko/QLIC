@@ -1,52 +1,55 @@
 #include "win_util.h"
-#include <string.h>
+#include <wchar.h>
+
+static int wrepeat(wchar_t *out, size_t cap, size_t *size, wchar_t value,
+                   size_t count) {
+  if (*size >= cap || count > cap - 1u - *size)
+    return 0;
+  wmemset(out + *size, value, count);
+  *size += count;
+  return 1;
+}
 
 static int wpush(wchar_t *out, size_t cap, size_t *size, wchar_t value) {
-  if (*size >= cap - 1u)
-    return 0;
-  out[(*size)++] = value;
-  return 1;
+  return wrepeat(out, cap, size, value, 1u);
 }
 
 int wquote(const wchar_t *src, wchar_t *out, size_t cap) {
   if (!src || !out || cap < 3u)
     return 0;
-  /* this has to mirror CommandLineToArgvW, especially trailing slashes */
-  size_t length = wcslen(src);
-  size_t pos = 0;
+  /* Match CommandLineToArgvW, including trailing slashes. */
+  const wchar_t *cursor = src;
   size_t n = 0;
   if (!wpush(out, cap, &n, L'"'))
     return 0;
-  while (pos < length) {
+  while (*cursor) {
     size_t slashes = 0;
-    while (pos < length && src[pos] == L'\\') {
+    while (*cursor == L'\\') {
       ++slashes;
-      ++pos;
+      ++cursor;
     }
-    if (pos == length) {
-      for (size_t i = 0; i < slashes; ++i) {
-        if (!wpush(out, cap, &n, L'\\') ||
-            !wpush(out, cap, &n, L'\\'))
-          return 0;
-      }
+    if (!*cursor) {
+      if (!wrepeat(out, cap, &n, L'\\', slashes))
+        return 0;
+      if (!wrepeat(out, cap, &n, L'\\', slashes))
+        return 0;
       break;
     }
-    if (src[pos] == L'"') {
-      for (size_t i = 0; i < slashes; ++i) {
-        if (!wpush(out, cap, &n, L'\\') ||
-            !wpush(out, cap, &n, L'\\'))
-          return 0;
-      }
-      if (!wpush(out, cap, &n, L'\\') ||
-          !wpush(out, cap, &n, L'"'))
+    if (*cursor == L'"') {
+      if (!wrepeat(out, cap, &n, L'\\', slashes))
         return 0;
-      ++pos;
-      continue;
-    }
-    for (size_t i = 0; i < slashes; ++i)
+      if (!wrepeat(out, cap, &n, L'\\', slashes))
+        return 0;
       if (!wpush(out, cap, &n, L'\\'))
         return 0;
-    if (!wpush(out, cap, &n, src[pos++]))
+      if (!wpush(out, cap, &n, L'"'))
+        return 0;
+      ++cursor;
+      continue;
+    }
+    if (!wrepeat(out, cap, &n, L'\\', slashes))
+      return 0;
+    if (!wpush(out, cap, &n, *cursor++))
       return 0;
   }
   if (!wpush(out, cap, &n, L'"'))

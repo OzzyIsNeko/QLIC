@@ -1,0 +1,33 @@
+name: CodeQL
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze-cpp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@7211b7c8077ea37d8641b6271f6a365a22a5fbfa
+        with:
+          languages: c-cpp
+          queries: security-extended,security-and-quality
+
+      - name: Build portable codec
+        run: |
+          cmake -S . -B build/codeql -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQLIC_BUILD_CLI=OFF -DQLIC_LINUX_LZMS=OFF
+          cmake --build build/codeql
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@7211b7c8077ea37d8641b6271f6a365a22a5fbfa

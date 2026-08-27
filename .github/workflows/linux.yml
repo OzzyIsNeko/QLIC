@@ -10,7 +10,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -22,30 +22,53 @@ jobs:
 
       - name: Release
         run: |
-          cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build/release
-          ctest --test-dir build/release --output-on-failure
+          cmake -S . -B build/ci-release -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/ci-release
+          ctest --test-dir build/ci-release --output-on-failure
 
-      - name: Installed SDK
+      - name: Installed CMake and pkg-config SDKs
         run: |
-          cmake --install build/release --prefix build/install
-          cmake -S tests/package_consumer -B build/consumer -G Ninja -DCMAKE_PREFIX_PATH=$PWD/build/install
-          cmake --build build/consumer
-          build/consumer/qlic-package-consumer-static
-          LD_LIBRARY_PATH=$PWD/build/install/lib build/consumer/qlic-package-consumer-shared
+          cmake --install build/ci-release --prefix "$PWD/build/ci-install"
+          cmake -S tests/package_consumer -B build/ci-consumer -G Ninja -DCMAKE_PREFIX_PATH="$PWD/build/ci-install"
+          cmake --build build/ci-consumer
+          build/ci-consumer/qlic-package-consumer-static
+          LD_LIBRARY_PATH="$PWD/build/ci-install/lib" build/ci-consumer/qlic-package-consumer-shared
+          export PKG_CONFIG_PATH="$PWD/build/ci-install/lib/pkgconfig"
+          test "$(pkg-config --modversion qlic)" = "1.0.0"
+          cc tests/package_consumer/main.c -o build/qlic-pkg-config-consumer $(pkg-config --cflags --libs qlic)
+          LD_LIBRARY_PATH="$PWD/build/ci-install/lib" build/qlic-pkg-config-consumer
 
       - name: Minimal dependencies
         run: |
-          cmake -S . -B build/minimal -G Ninja -DCMAKE_BUILD_TYPE=Release -DQLIC_BUILD_CLI=OFF -DQLIC_LINUX_LZMS=OFF
-          cmake --build build/minimal
-          ctest --test-dir build/minimal --output-on-failure
+          cmake -S . -B build/ci-minimal -G Ninja -DCMAKE_BUILD_TYPE=Release -DQLIC_BUILD_CLI=OFF -DQLIC_LINUX_LZMS=OFF
+          cmake --build build/ci-minimal
+          ctest --test-dir build/ci-minimal --output-on-failure
 
-      - name: Sanitizers
+      - name: Clang sanitizers
         env:
           CC: clang
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1
         run: |
-          cmake -S . -B build/sanitize -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQLIC_SANITIZE=ON
-          cmake --build build/sanitize
-          ctest --test-dir build/sanitize --output-on-failure
+          cmake -S . -B build/ci-sanitize -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQLIC_SANITIZE=ON
+          cmake --build build/ci-sanitize
+          ctest --test-dir build/ci-sanitize --output-on-failure
+
+      - name: Coverage-guided decoder fuzzing
+        env:
+          CC: clang
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: |
+          cmake -S . -B build/ci-fuzz -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQLIC_BUILD_CLI=OFF -DQLIC_LINUX_LZMS=OFF -DQLIC_LIBFUZZER=ON
+          cmake --build build/ci-fuzz --target qlic-fuzz-decode
+          build/ci-fuzz/qlic-fuzz-decode tests/fixtures -runs=20000 -max_len=1048576 -timeout=20
+
+      - name: Rust decoder
+        working-directory: rust/qlic-decoder
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal
+          cargo +1.85.0 check --all-targets
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test --release --all-targets

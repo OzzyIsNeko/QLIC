@@ -1,0 +1,10 @@
+prefix=${pcfiledir}/@QLIC_PC_PREFIX_RELATIVE@
+exec_prefix=${prefix}
+libdir=@QLIC_PC_LIBDIR@
+includedir=@QLIC_PC_INCLUDEDIR@
+
+Name: qlic
+Description: QLIC lossless image codec C library
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lqlic
+Cflags: -I${includedir}

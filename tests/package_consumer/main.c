@@ -17,5 +17,23 @@ int main(void) {
                 memcmp(decoded.rgba, source, sizeof(source)) == 0;
     qlic_image_free(&decoded);
     qlic_free(encoded);
-    return exact ? 0 : 1;
+
+    const uint16_t wide_source[12] = {
+        0, 1, 4095, 17, 2048, 3001, 4094, 123, 777, 1024, 2047, 3333};
+    encoded = NULL;
+    encoded_size = 0;
+    qlic_wide_image wide = {0};
+    result = qlic_encode_wide(
+        wide_source, sizeof(wide_source), 2, 2, 2u * 3u * sizeof(uint16_t),
+        3, 12, NULL, &encoded, &encoded_size);
+    if (result == QLIC_OK)
+        result = qlic_decode_wide(encoded, encoded_size, NULL, &wide);
+    int wide_exact = result == QLIC_OK && wide.width == 2 &&
+                     wide.height == 2 && wide.channels == 3 &&
+                     wide.bits_per_sample == 12 &&
+                     wide.pixels_size == sizeof(wide_source) &&
+                     memcmp(wide.pixels, wide_source, sizeof(wide_source)) == 0;
+    qlic_wide_image_free(&wide);
+    qlic_free(encoded);
+    return exact && wide_exact ? 0 : 1;
 }

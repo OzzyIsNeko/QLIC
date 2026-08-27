@@ -2,6 +2,8 @@ param(
   [ValidateSet("Debug", "Release", "RelWithDebInfo", "MinSizeRel")]
   [string]$Config = "Release",
   [string]$BuildDir = "build",
+  [ValidateSet("x64", "ARM64")]
+  [string]$Architecture = "x64",
   [switch]$SkipTests
 )
 
@@ -33,8 +35,9 @@ if (!$generator) {
 }
 
 $base = if ([System.IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $root $BuildDir }
-$out = Join-Path $base $generator.Dir
-& $cmake.Source -S $root -B $out -G $generator.Name -A x64 -D BUILD_TESTING=ON
+$out = Join-Path $base "$($generator.Dir)-$($Architecture.ToLowerInvariant())"
+& $cmake.Source -S $root -B $out -G $generator.Name -A $Architecture `
+  -D BUILD_TESTING=ON
 if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed." }
 & $cmake.Source --build $out --config $Config --parallel
 if ($LASTEXITCODE -ne 0) { throw "Build failed." }

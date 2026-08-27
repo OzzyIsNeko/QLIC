@@ -1,6 +1,7 @@
 param(
   [string]$Config = "Release",
-  [string]$Qlic = ""
+  [string]$Qlic = "",
+  [switch]$SkipWebBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,6 +9,8 @@ $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
 function Find-QLIC {
   foreach ($p in @(
+    (Join-Path $root "build\vs18-x64\$Config\qlic.exe"),
+    (Join-Path $root "build\vs17-x64\$Config\qlic.exe"),
     (Join-Path $root "build\vs18\$Config\qlic.exe"),
     (Join-Path $root "build\vs17\$Config\qlic.exe"),
     (Join-Path $root "build\clang-nmake\qlic.exe"),
@@ -27,7 +30,11 @@ if (!$cli) {
   throw "qlic.exe was not found after build."
 }
 
-& (Join-Path $root "scripts\build-web.ps1")
+if (!$SkipWebBuild) {
+  & (Join-Path $root "scripts\build-web.ps1")
+}
+$node = Get-Command node.exe -ErrorAction SilentlyContinue
+if (!$node) { throw "Node.js is required for the WebAssembly test." }
 
 function B([int]$v) {
   return [byte]($v -band 255)
@@ -145,6 +152,8 @@ foreach ($input in $inputs) {
 
 $env:QLIC_WASM_TEST_FILES = ($files | ConvertTo-Json -Compress)
 $env:QLIC_WASM_ANIM_PARTS = (@($files[6], $files[7], $files[8]) | ConvertTo-Json -Compress)
+$wasmPath = Join-Path $root "web\dist\qlic-web.wasm"
+$env:QLIC_WASM_BINARY = (Resolve-Path -LiteralPath $wasmPath).Path
 $runner = Join-Path $env:TEMP "qlic-wasm-test.mjs"
 $module = Join-Path $env:TEMP "qlic-web-test.mjs"
 Copy-Item (Join-Path $root "web\dist\qlic-web.js") $module -Force
@@ -153,9 +162,8 @@ Copy-Item (Join-Path $root "web\dist\qlic-web.js") $module -Force
 import fs from "fs";
 import { createQlic } from "./qlic-web-test.mjs";
 
-const root = process.cwd();
 const qlic = await createQlic({
-  wasmBinary: fs.readFileSync(root + "/web/dist/qlic-web.wasm")
+  wasmBinary: fs.readFileSync(process.env.QLIC_WASM_BINARY)
 });
 
 for (const file of JSON.parse(process.env.QLIC_WASM_TEST_FILES)) {
@@ -328,5 +336,5 @@ for (let i = 0; i < expectedMove.length; i++) {
 console.log("animation-move 2");
 '@ | Set-Content -Encoding ASCII $runner
 
-node $runner
+& $node.Source $runner
 if ($LASTEXITCODE -ne 0) { throw "WebAssembly decode test failed." }

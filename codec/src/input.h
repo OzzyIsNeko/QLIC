@@ -11,10 +11,27 @@ typedef enum {
   QLIC_INPUT_JXL = 2
 } QlicInputDecoder;
 
+#define QLIC_INPUT_MAX_METADATA 64u
+
+typedef struct {
+  uint8_t tag[4];
+  const uint8_t *data;
+  size_t size;
+} QlicInputMetadata;
+
 typedef struct {
   uint8_t *data;
   size_t size;
   QlicInputDecoder decoder;
+  uint32_t channels;
+  uint32_t bits_per_sample;
+  /* 0 none/unknown, 1 straight/unassociated, 2 premultiplied/associated. */
+  uint32_t alpha_mode;
+  const uint8_t *icc;
+  size_t icc_size;
+  uint8_t *owned_icc;
+  QlicInputMetadata metadata[QLIC_INPUT_MAX_METADATA];
+  uint32_t metadata_count;
 } QlicInput;
 
 typedef struct {

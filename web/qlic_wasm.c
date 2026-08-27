@@ -1,58 +1,17 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../codec/src/lzms.h"
+#include "../codec/src/qlic_core.h"
 #include "../codec/src/stream.h"
 
-#define QLIC_HEADER_SIZE 28u
-#define QLIC_FOOTER_SIZE 4u
-#define QLIC_CODEC_CRC 0x80u
 #define QLIC_MAX_FILE_BYTES UINT64_C(268435456)
 #define QLIC_MAX_PAYLOAD_BYTES UINT64_C(268435456)
 #define QLIC_MAX_PIXELS UINT64_C(33554432)
 #define QLIC_MAX_ANIMATION_BYTES UINT64_C(268435456)
+#define QLIC_MAX_DECODED_BYTES UINT64_C(268435456)
+#define QLIC_MAX_METADATA_BYTES UINT64_C(16777216)
 #define QLIC_MAX_FRAMES 4096u
-
-enum {
-  MODE_GRAY = 1,
-  MODE_GRAYA = 2,
-  MODE_RGB = 3,
-  MODE_RGBA = 4,
-  MODE_PALETTE = 5,
-  MODE_SOURCE = 6,
-  MODE_SEPARABLE = 7,
-  MODE_RESERVED = 8,
-  MODE_NATIVE = 9,
-  MODE_FILTERED = 10,
-  MODE_PSTREAM = 11,
-  MODE_PPAL = 12,
-  MODE_CPAL = 13,
-  MODE_TILES = 14,
-  MODE_TILE_MODEL = 15,
-  MODE_GMODEL = 16,
-  MODE_ANIM = 17,
-  MODE_BLOCKS = 18
-};
-
-enum {
-  TRANSFORM_IDENTITY = 0,
-  TRANSFORM_GDELTA = 1,
-  TRANSFORM_IDENTITY_RAW = 2,
-  TRANSFORM_GDELTA_RAW = 3,
-  TRANSFORM_IDENTITY_RLE = 4,
-  TRANSFORM_GDELTA_RLE = 5,
-  TRANSFORM_INDEX_RLE = 6,
-  TRANSFORM_SEPARABLE_DELTA = 7,
-  TRANSFORM_RDELTA = 8,
-  TRANSFORM_BDELTA = 9,
-  TRANSFORM_CPAL_DELTA = 10
-};
-
-enum {
-  CODEC_STORE = 0,
-  CODEC_XPRESS = 1,
-  CODEC_XPRESS_HUFF = 2,
-  CODEC_LZMS = 3
-};
+#define QLIC_MAX_CHUNKS 256u
 
 enum {
   ANIM_FRAME_KEY,
@@ -94,18 +53,6 @@ enum {
 #define CF_SIZE 64u
 
 typedef struct {
-  uint8_t *data;
-  size_t size;
-  size_t cap;
-} Buf;
-
-typedef struct {
-  uint32_t width;
-  uint32_t height;
-  uint8_t *rgba;
-} Image;
-
-typedef struct {
   uint32_t width;
   uint32_t height;
   uint32_t delay;
@@ -124,7 +71,7 @@ typedef struct {
   uint64_t compressed_size;
 } Head;
 
-/* this target is freestanding, the allocator replaces the missing C runtime */
+/* Freestanding allocator for the missing C runtime. */
 typedef struct Block Block;
 struct Block {
   size_t size;
@@ -147,9 +94,18 @@ static uint32_t loop_count;
 static uint32_t animated;
 static uint8_t *encoded_data;
 static uint32_t encoded_size;
+static WideImage wide_result;
+static HdrImage hdr_result;
+static WideImage *sample_result;
+static uint8_t hdr_metadata[68];
+static uint32_t hdr_metadata_size;
 
-int enc_mem(const Image *image, Buf *file, void *chosen);
-const char *qlic_core_error(void);
+static const QlicDecodeLimits decode_limits = {
+    QLIC_MAX_FILE_BYTES,      QLIC_MAX_PAYLOAD_BYTES,
+    QLIC_MAX_PIXELS,          QLIC_MAX_ANIMATION_BYTES,
+    QLIC_MAX_DECODED_BYTES,   QLIC_MAX_METADATA_BYTES,
+    QLIC_MAX_FRAMES,          QLIC_MAX_CHUNKS};
+
 void *memcpy(void *d, const void *s, size_t n) {
   uint8_t *dd = (uint8_t *)d;
   const uint8_t *ss = (const uint8_t *)s;
@@ -384,6 +340,11 @@ static void clear_result(void) {
   animated = 0;
   encoded_data = 0;
   encoded_size = 0;
+  memset(&wide_result, 0, sizeof(wide_result));
+  memset(&hdr_result, 0, sizeof(hdr_result));
+  sample_result = 0;
+  memset(hdr_metadata, 0, sizeof(hdr_metadata));
+  hdr_metadata_size = 0;
 }
 
 void qlic_reset(void) {
@@ -397,6 +358,8 @@ void qlic_reset(void) {
 
 uint32_t qlic_alloc(uint32_t n) {
   void *p = malloc((size_t)n);
+  /* WebAssembly exposes pointers as offsets in its 32-bit linear memory. */
+  // cppcheck-suppress [memleak, CastAddressToIntegerAtReturn]
   return (uint32_t)(uintptr_t)p;
 }
 
@@ -439,6 +402,7 @@ int qlic_encode(uint32_t ptr, uint32_t n, uint32_t width, uint32_t height) {
 }
 
 uint32_t qlic_encoded_ptr(void) {
+  // cppcheck-suppress CastAddressToIntegerAtReturn
   return (uint32_t)(uintptr_t)encoded_data;
 }
 
@@ -518,6 +482,10 @@ static int is_rd(int t) { return t == TRANSFORM_RDELTA; }
 
 static int is_bd(int t) { return t == TRANSFORM_BDELTA; }
 
+static int is_planar_med(int t) {
+  return t == TRANSFORM_BDELTA_PLANAR_MED;
+}
+
 static int is_rle(int t) {
   return t == TRANSFORM_IDENTITY_RLE || t == TRANSFORM_GDELTA_RLE;
 }
@@ -545,6 +513,21 @@ static int palette_count_ok(uint32_t count, int bits) {
   if (bits < 16 && count > (1u << bits))
     return 0;
   return count <= 65536u;
+}
+
+static int pal_bits(uint32_t count) {
+  if (count <= 2u)
+    return 1;
+  if (count <= 4u)
+    return 2;
+  if (count <= 16u)
+    return 4;
+  if (count <= 256u)
+    return 8;
+  int bits = 0;
+  for (uint32_t value = count - 1u; value; value >>= 1)
+    ++bits;
+  return bits;
 }
 
 static size_t row_pack(uint32_t width, int bits) {
@@ -707,7 +690,7 @@ static int file_palette_mode(int mode) {
   return mode == MODE_PALETTE || mode == MODE_PSTREAM || mode == MODE_PPAL;
 }
 
-static int rd_head(const uint8_t *data, size_t size, Head *h) {
+static int read_head(const uint8_t *data, size_t size, Head *h) {
   if ((uint64_t)size > QLIC_MAX_FILE_BYTES) {
     set_error("resource limit exceeded: file bytes");
     return 0;
@@ -748,13 +731,20 @@ static int rd_head(const uint8_t *data, size_t size, Head *h) {
     return 0;
   }
   if (h->transform < TRANSFORM_IDENTITY ||
-      h->transform > TRANSFORM_CPAL_DELTA) {
+      h->transform > TRANSFORM_CPAL_PLANAR) {
     set_error("corrupt file: invalid transform");
     return 0;
   }
   if ((packed & ~(QLIC_CODEC_CRC | 3u)) ||
       (h->codec != CODEC_STORE && h->codec != CODEC_LZMS)) {
     set_error("corrupt file: invalid codec");
+    return 0;
+  }
+  if (is_planar_med(h->transform) &&
+      ((h->mode != MODE_RGB && h->mode != MODE_RGBA) ||
+       h->index_bits != 0 || h->palette_count != 0 ||
+       h->codec != CODEC_LZMS)) {
+    set_error("corrupt file: invalid planar MED header");
     return 0;
   }
   if (h->mode == MODE_NATIVE && (h->transform != TRANSFORM_IDENTITY ||
@@ -781,10 +771,18 @@ static int rd_head(const uint8_t *data, size_t size, Head *h) {
   }
   if (h->mode == MODE_CPAL &&
       (!palette_count_ok(h->palette_count, h->index_bits) ||
-       (h->transform != TRANSFORM_IDENTITY_RAW &&
-        h->transform != TRANSFORM_INDEX_RLE &&
-        h->transform != TRANSFORM_CPAL_DELTA))) {
+        (h->transform != TRANSFORM_IDENTITY_RAW &&
+         h->transform != TRANSFORM_INDEX_RLE &&
+         h->transform != TRANSFORM_CPAL_DELTA &&
+         h->transform != TRANSFORM_CPAL_TILES &&
+         h->transform != TRANSFORM_CPAL_PLANAR))) {
     set_error("corrupt file: invalid cpalette header");
+    return 0;
+  }
+  if (h->transform == TRANSFORM_CPAL_PLANAR &&
+      (h->mode != MODE_CPAL || h->palette_count <= 256u ||
+       h->index_bits != pal_bits(h->palette_count))) {
+    set_error("corrupt file: invalid planar cpalette header");
     return 0;
   }
   if (h->mode == MODE_TILES &&
@@ -1003,6 +1001,93 @@ static int samp_rgba(const Buf *samples, const Head *h, const uint8_t *palette,
   return 1;
 }
 
+static uint8_t med_predict8(uint8_t left, uint8_t up, uint8_t upper_left) {
+  int low = left < up ? left : up;
+  int high = left > up ? left : up;
+  int gradient = (int)left + (int)up - (int)upper_left;
+  gradient = gradient < low ? low : gradient;
+  gradient = gradient > high ? high : gradient;
+  return (uint8_t)gradient;
+}
+
+static uint8_t planar_med_step(uint8_t *plane, size_t pos, size_t width) {
+  uint8_t value = (uint8_t)(plane[pos] +
+                            med_predict8(plane[pos - 1u], plane[pos - width],
+                                         plane[pos - width - 1u]));
+  plane[pos] = value;
+  return value;
+}
+
+static int planar_med_rgba(Buf *residual, const Head *h, Image *out) {
+  size_t pixels = 0;
+  size_t payload_bytes = 0;
+  size_t rgba_bytes = 0;
+  int channels = mbpp(h->mode);
+  if ((h->mode != MODE_RGB && h->mode != MODE_RGBA) ||
+      !mulok((size_t)h->width, (size_t)h->height, &pixels) ||
+      !mulok(pixels, (size_t)channels, &payload_bytes) ||
+      residual->size != payload_bytes || !mulok(pixels, 4u, &rgba_bytes)) {
+    set_error("corrupt file: invalid planar MED payload");
+    return 0;
+  }
+  out->rgba = (uint8_t *)malloc(rgba_bytes);
+  if (!out->rgba) {
+    set_error("out of memory");
+    return 0;
+  }
+  out->width = h->width;
+  out->height = h->height;
+  uint8_t *blue = residual->data;
+  uint8_t *red_delta = blue + pixels;
+  uint8_t *green_delta = red_delta + pixels;
+  uint8_t *alpha = channels == 4 ? green_delta + pixels : 0;
+
+  for (uint32_t x = 0; x < h->width; ++x) {
+    size_t pos = x;
+    if (x) {
+      blue[pos] = (uint8_t)(blue[pos] + blue[pos - 1u]);
+      red_delta[pos] = (uint8_t)(red_delta[pos] + red_delta[pos - 1u]);
+      green_delta[pos] =
+          (uint8_t)(green_delta[pos] + green_delta[pos - 1u]);
+      if (alpha)
+        alpha[pos] = (uint8_t)(alpha[pos] + alpha[pos - 1u]);
+    }
+    uint8_t *pixel = out->rgba + pos * 4u;
+    pixel[0] = (uint8_t)(blue[pos] + red_delta[pos]);
+    pixel[1] = (uint8_t)(blue[pos] + green_delta[pos]);
+    pixel[2] = blue[pos];
+    pixel[3] = alpha ? alpha[pos] : 255u;
+  }
+  for (uint32_t y = 1; y < h->height; ++y) {
+    size_t row = (size_t)y * h->width;
+    blue[row] = (uint8_t)(blue[row] + blue[row - h->width]);
+    red_delta[row] =
+        (uint8_t)(red_delta[row] + red_delta[row - h->width]);
+    green_delta[row] =
+        (uint8_t)(green_delta[row] + green_delta[row - h->width]);
+    if (alpha)
+      alpha[row] = (uint8_t)(alpha[row] + alpha[row - h->width]);
+    uint8_t *first = out->rgba + row * 4u;
+    first[0] = (uint8_t)(blue[row] + red_delta[row]);
+    first[1] = (uint8_t)(blue[row] + green_delta[row]);
+    first[2] = blue[row];
+    first[3] = alpha ? alpha[row] : 255u;
+    for (uint32_t x = 1; x < h->width; ++x) {
+      size_t pos = row + x;
+      uint8_t b = planar_med_step(blue, pos, h->width);
+      uint8_t rd = planar_med_step(red_delta, pos, h->width);
+      uint8_t gd = planar_med_step(green_delta, pos, h->width);
+      uint8_t a = alpha ? planar_med_step(alpha, pos, h->width) : 255u;
+      uint8_t *pixel = out->rgba + pos * 4u;
+      pixel[0] = (uint8_t)(b + rd);
+      pixel[1] = (uint8_t)(b + gd);
+      pixel[2] = b;
+      pixel[3] = a;
+    }
+  }
+  return 1;
+}
+
 static int samp_size(const Head *h, size_t *out) {
   size_t pixels;
   if (!mulok((size_t)h->width, (size_t)h->height, &pixels))
@@ -1197,8 +1282,8 @@ static int dec_tile(const Buf *payload, const Head *h, Image *out) {
   }
   uint32_t count = rd32(payload->data);
   uint32_t tile_h = h->palette_count;
-  uint32_t want = (h->height + tile_h - 1u) / tile_h;
-  if (!count || count != want || count > 65536u ||
+  uint32_t want = 1u + (h->height - 1u) / tile_h;
+  if (!count || count != want || count > QLIC_MAX_CHUNKS ||
       (size_t)count > (payload->size - 4u) / 4u) {
     set_error("corrupt file: invalid tile stream table");
     return 0;
@@ -1220,7 +1305,7 @@ static int dec_tile(const Buf *payload, const Head *h, Image *out) {
     uint32_t size = rd32(payload->data + 4u + (size_t)i * 4u);
     if ((size_t)size > payload->size - off) {
       set_error("corrupt file: tile stream chunk exceeds payload");
-      return 0;
+      goto corrupt;
     }
     uint32_t y0 = i * tile_h;
     uint32_t th = h->height - y0 < tile_h ? h->height - y0 : tile_h;
@@ -1235,7 +1320,7 @@ static int dec_tile(const Buf *payload, const Head *h, Image *out) {
       free(pix);
       set_error(e == STREAM_OK ? "corrupt file: tile dimensions mismatch"
                                : stream_strerror(e));
-      return 0;
+      goto corrupt;
     }
     tile_copy(out, y0, th, h->width, h->index_bits, pix);
     free(pix);
@@ -1243,9 +1328,14 @@ static int dec_tile(const Buf *payload, const Head *h, Image *out) {
   }
   if (off != payload->size) {
     set_error("corrupt file: trailing tile stream data");
-    return 0;
+    goto corrupt;
   }
   return 1;
+
+corrupt:
+  free(out->rgba);
+  image_zero(out);
+  return 0;
 }
 
 static int clamp8(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
@@ -1705,11 +1795,190 @@ static int dec_ppal(const Buf *payload, const Head *h, const uint8_t *palette,
   return 1;
 }
 
+static int dec_cpal_tiles(const Buf *payload, const Head *h, Image *out) {
+  enum { MIN_TILE_LOG = 3, MAX_TILE_LOG = 6 };
+  size_t palette_size = (size_t)h->palette_count * 4u;
+  size_t pixels = 0;
+  size_t rgba_bytes = 0;
+  if (payload->size < 1u + palette_size ||
+      !mulok((size_t)h->width, (size_t)h->height, &pixels) ||
+      !mulok(pixels, 4u, &rgba_bytes)) {
+    set_error("corrupt file: tile-palette payload size mismatch");
+    return 0;
+  }
+  unsigned tile_log = payload->data[0];
+  if (tile_log < MIN_TILE_LOG || tile_log > MAX_TILE_LOG) {
+    set_error("corrupt file: invalid tile-palette size");
+    return 0;
+  }
+  uint32_t tile_size = 1u << tile_log;
+  size_t max_tile_pixels = (size_t)tile_size * tile_size;
+  uint16_t *local_palette =
+      (uint16_t *)malloc(max_tile_pixels * sizeof(uint16_t));
+  out->rgba = (uint8_t *)malloc(rgba_bytes);
+  if (!local_palette || !out->rgba) {
+    free(local_palette);
+    free(out->rgba);
+    out->rgba = 0;
+    set_error("out of memory");
+    return 0;
+  }
+  out->width = h->width;
+  out->height = h->height;
+  const uint8_t *palette = payload->data + 1u;
+  size_t position = 1u + palette_size;
+
+  for (uint32_t y0 = 0; y0 < h->height; y0 += tile_size) {
+    uint32_t tile_height = h->height - y0 < tile_size
+                               ? h->height - y0
+                               : tile_size;
+    for (uint32_t x0 = 0; x0 < h->width; x0 += tile_size) {
+      uint32_t tile_width =
+          h->width - x0 < tile_size ? h->width - x0 : tile_size;
+      size_t tile_pixels = (size_t)tile_width * tile_height;
+      size_t local_count_m1 = 0;
+      if (!read_varint(payload->data, payload->size, &position,
+                       &local_count_m1) ||
+          local_count_m1 >= tile_pixels ||
+          local_count_m1 >= h->palette_count) {
+        set_error("corrupt file: invalid tile-local palette size");
+        goto corrupt;
+      }
+      size_t local_count = local_count_m1 + 1u;
+      size_t previous = 0;
+      for (size_t i = 0; i < local_count; ++i) {
+        size_t gap = 0;
+        if (!read_varint(payload->data, payload->size, &position, &gap) ||
+            (i && (previous == (size_t)-1 ||
+                   gap > (size_t)-1 - previous - 1u))) {
+          set_error("corrupt file: invalid tile-local palette gap");
+          goto corrupt;
+        }
+        size_t global_index = i ? previous + gap + 1u : gap;
+        if (global_index >= h->palette_count) {
+          set_error("corrupt file: tile-local palette index out of range");
+          goto corrupt;
+        }
+        local_palette[i] = (uint16_t)global_index;
+        previous = global_index;
+      }
+
+      int local_bits = pal_bits((uint32_t)local_count);
+      size_t packed_bits = 0;
+      if (!mulok(tile_pixels, (size_t)local_bits, &packed_bits) ||
+          packed_bits > (size_t)-1 - 7u) {
+        set_error("corrupt file: tile-local index size overflow");
+        goto corrupt;
+      }
+      size_t packed_bytes = (packed_bits + 7u) >> 3;
+      if (position > payload->size ||
+          packed_bytes > payload->size - position) {
+        set_error("corrupt file: truncated tile-local indices");
+        goto corrupt;
+      }
+      const uint8_t *packed = payload->data + position;
+      size_t pixel_index = 0;
+      for (uint32_t y = 0; y < tile_height; ++y) {
+        size_t output = ((size_t)(y0 + y) * h->width + x0) * 4u;
+        for (uint32_t x = 0; x < tile_width; ++x, ++pixel_index) {
+          uint32_t local_index =
+              unpack_i(packed, (uint32_t)pixel_index, local_bits);
+          if (local_index >= local_count) {
+            set_error("corrupt file: tile-local index out of range");
+            goto corrupt;
+          }
+          size_t source = (size_t)local_palette[local_index] * 4u;
+          size_t destination = output + (size_t)x * 4u;
+          for (unsigned channel = 0; channel < 4u; ++channel)
+            out->rgba[destination + channel] = palette[source + channel];
+        }
+      }
+      position += packed_bytes;
+    }
+  }
+  free(local_palette);
+  if (position != payload->size) {
+    set_error("corrupt file: trailing tile-palette data");
+    free(out->rgba);
+    image_zero(out);
+    return 0;
+  }
+  return 1;
+
+corrupt:
+  free(local_palette);
+  free(out->rgba);
+  image_zero(out);
+  return 0;
+}
+
 static int dec_cpal(const Buf *payload, const Head *h, Image *out) {
+  if (h->transform == TRANSFORM_CPAL_TILES)
+    return dec_cpal_tiles(payload, h, out);
   size_t palette_size = (size_t)h->palette_count * 4u;
   if (payload->size < palette_size) {
     set_error("corrupt file: cpalette payload size mismatch");
     return 0;
+  }
+  if (h->transform == TRANSFORM_CPAL_PLANAR) {
+    size_t pixels = 0;
+    size_t index_bytes = 0;
+    size_t expected = 0;
+    size_t rgba_bytes = 0;
+    if (!mulok((size_t)h->width, (size_t)h->height, &pixels) ||
+        !mulok(pixels, 2u, &index_bytes) ||
+        !addok(1u, palette_size, &expected) ||
+        !addok(expected, index_bytes, &expected) ||
+        payload->size != expected || !mulok(pixels, 4u, &rgba_bytes)) {
+      set_error("corrupt file: planar cpalette payload size mismatch");
+      return 0;
+    }
+    unsigned layout = payload->data[0];
+    if (layout > 1u) {
+      set_error("corrupt file: invalid planar cpalette layout");
+      return 0;
+    }
+    uint8_t *palette = (uint8_t *)malloc(palette_size);
+    uint8_t *rgba = (uint8_t *)malloc(rgba_bytes);
+    if (!palette || !rgba) {
+      free(palette);
+      free(rgba);
+      set_error("out of memory");
+      return 0;
+    }
+    size_t position = 1u;
+    for (unsigned channel = 0; channel < 4u; ++channel) {
+      uint8_t previous = 0;
+      for (uint32_t i = 0; i < h->palette_count; ++i) {
+        uint8_t delta = payload->data[position++];
+        uint8_t value = i ? (uint8_t)(previous + delta) : delta;
+        palette[(size_t)i * 4u + channel] = value;
+        previous = value;
+      }
+    }
+    const uint8_t *indices = payload->data + position;
+    const uint8_t *high = layout == 1u ? indices + pixels : NULL;
+    for (size_t i = 0; i < pixels; ++i) {
+      uint32_t index = layout == 0u
+                           ? rd16(indices + i * 2u)
+                           : (uint32_t)indices[i] |
+                                 ((uint32_t)high[i] << 8);
+      if (index >= h->palette_count) {
+        free(palette);
+        free(rgba);
+        set_error("corrupt file: planar cpalette index out of range");
+        return 0;
+      }
+      size_t source = (size_t)index * 4u;
+      size_t destination = i * 4u;
+      for (unsigned channel = 0; channel < 4u; ++channel)
+        rgba[destination + channel] = palette[source + channel];
+    }
+    free(palette);
+    out->rgba = rgba;
+    out->width = h->width;
+    out->height = h->height;
+    return 1;
   }
   if (h->transform == TRANSFORM_INDEX_RLE) {
     Buf runs = {payload->data + palette_size, payload->size - palette_size,
@@ -1756,9 +2025,10 @@ typedef struct {
   size_t pos;
 } QBlockReader;
 
-static uint32_t blk_dim(uint32_t total, uint32_t origin) {
+static inline uint32_t block_extent(uint32_t total, uint32_t origin,
+                                    uint32_t limit) {
   uint32_t left = total - origin;
-  return left < BLK_SIZE ? left : BLK_SIZE;
+  return left < limit ? left : limit;
 }
 
 static int blk_bits(int n) {
@@ -1922,11 +2192,6 @@ static uint8_t pdm_pred(const uint8_t *pix, uint32_t w, uint32_t x, uint32_t y,
   uint8_t block =
       pdm_lerp(flat[c], blk2_grad(grad, bw, bh, xx, yy, c), pdm_q(par, 2));
   return pdm_lerp(nb, block, pdm_q(par, 0));
-}
-
-static uint32_t cf_dim(uint32_t total, uint32_t origin) {
-  uint32_t left = total - origin;
-  return left < CF_SIZE ? left : CF_SIZE;
 }
 
 static void cf_base(const uint8_t *pix, uint32_t w, uint32_t x, uint32_t y,
@@ -2184,8 +2449,8 @@ static int dec_cf_regions(const Buf *payload, const Head *h, Image *out) {
   size_t tpos = 0;
   for (uint32_t y = 0; y < h->height; y += CF_SIZE) {
     for (uint32_t x = 0; x < h->width; x += CF_SIZE) {
-      uint32_t bw = cf_dim(h->width, x);
-      uint32_t bh = cf_dim(h->height, y);
+      uint32_t bw = block_extent(h->width, x, CF_SIZE);
+      uint32_t bh = block_extent(h->height, y, CF_SIZE);
       if (tpos > table_size || table_size - tpos < 3u) {
         free(pix);
         free(res);
@@ -2304,8 +2569,8 @@ static int dec_blocks2(const Buf *payload, const Head *h, Image *out) {
   QBlockReader r = {payload->data + 20u, table_size, 0u};
   for (uint32_t y = 0; y < h->height; y += BLK_SIZE) {
     for (uint32_t x = 0; x < h->width; x += BLK_SIZE) {
-      uint32_t bw = blk_dim(h->width, x);
-      uint32_t bh = blk_dim(h->height, y);
+      uint32_t bw = block_extent(h->width, x, BLK_SIZE);
+      uint32_t bh = block_extent(h->height, y, BLK_SIZE);
       uint8_t op = 0;
       if (!qr_u8(&r, &op)) {
         free(pix);
@@ -2376,11 +2641,6 @@ static int dec_blocks2(const Buf *payload, const Head *h, Image *out) {
   return 1;
 }
 
-static uint32_t pdm_dim(uint32_t total, uint32_t origin) {
-  uint32_t left = total - origin;
-  return left < PDM_SIZE ? left : PDM_SIZE;
-}
-
 static int dec_pdm_regions(const Buf *payload, const Head *h, Image *out) {
   if (payload->size < 20u || memcmp(payload->data, "QPD1", 4u) ||
       payload->data[4] != PDM_SIZE ||
@@ -2439,8 +2699,8 @@ static int dec_pdm_regions(const Buf *payload, const Head *h, Image *out) {
   size_t parn = blk2_parn(BLK2_PDM, ch);
   for (uint32_t y = 0; y < h->height; y += PDM_SIZE) {
     for (uint32_t x = 0; x < h->width; x += PDM_SIZE) {
-      uint32_t bw = pdm_dim(h->width, x);
-      uint32_t bh = pdm_dim(h->height, y);
+      uint32_t bw = block_extent(h->width, x, PDM_SIZE);
+      uint32_t bh = block_extent(h->height, y, PDM_SIZE);
       if (!qr_need(&r, parn)) {
         free(pix);
         free(res);
@@ -2533,8 +2793,8 @@ static int dec_blocks(const Buf *payload, const Head *h, Image *out) {
   size_t block_index = 0;
   for (uint32_t y = 0; y < h->height; y += BLK_SIZE) {
     for (uint32_t x = 0; x < h->width; x += BLK_SIZE) {
-      uint32_t bw = blk_dim(h->width, x);
-      uint32_t bh = blk_dim(h->height, y);
+      uint32_t bw = block_extent(h->width, x, BLK_SIZE);
+      uint32_t bh = block_extent(h->height, y, BLK_SIZE);
       uint8_t op = 0;
       uint32_t colors[4];
       if (!qr_u8(&r, &op))
@@ -2651,6 +2911,8 @@ static int dec_qlic_image(const uint8_t *data, size_t size, const Head *head,
     ok = dec_sep(&payload, &h, out);
   } else if (h.mode == MODE_PALETTE && h.transform == TRANSFORM_INDEX_RLE) {
     ok = dec_irun(&payload, &h, palette, out);
+  } else if (is_planar_med(h.transform)) {
+    ok = planar_med_rgba(&payload, &h, out);
   } else if (is_rle(h.transform)) {
     size_t expected = 0;
     Buf samples = {0};
@@ -2825,7 +3087,7 @@ static int dec_anim2_payload(const Buf *payload, const Head *h) {
       return 0;
     }
     Head fh;
-    if (!rd_head(payload->data + pos, (size_t)n64, &fh)) {
+    if (!read_head(payload->data + pos, (size_t)n64, &fh)) {
       free_frames(fs, count);
       return 0;
     }
@@ -2917,7 +3179,7 @@ static int dec_anim_payload(const Buf *payload, const Head *h) {
       return 0;
     }
     Head fh;
-    if (!rd_head(payload->data + pos, (size_t)n64, &fh)) {
+    if (!read_head(payload->data + pos, (size_t)n64, &fh)) {
       free_frames(fs, count);
       return 0;
     }
@@ -2955,16 +3217,166 @@ static int dec_anim_payload(const Buf *payload, const Head *h) {
   return 1;
 }
 
+static int input_valid(uint32_t ptr, uint32_t n) {
+  uintptr_t memory_size =
+      (uintptr_t)__builtin_wasm_memory_size(0) << 16;
+  if (!ptr || !n || (uintptr_t)ptr > memory_size ||
+      (uintptr_t)n > memory_size - (uintptr_t)ptr) {
+    set_error("invalid input memory");
+    return 0;
+  }
+  return 1;
+}
+
+static void core_error(const char *fallback) {
+  const char *error = qlic_core_error();
+  set_error(error && error[0] ? error : fallback);
+}
+
+static void meta16(size_t offset, uint16_t value) {
+  hdr_metadata[offset] = (uint8_t)value;
+  hdr_metadata[offset + 1u] = (uint8_t)(value >> 8);
+}
+
+static void meta32(size_t offset, uint32_t value) {
+  hdr_metadata[offset] = (uint8_t)value;
+  hdr_metadata[offset + 1u] = (uint8_t)(value >> 8);
+  hdr_metadata[offset + 2u] = (uint8_t)(value >> 16);
+  hdr_metadata[offset + 3u] = (uint8_t)(value >> 24);
+}
+
+static void make_hdr_metadata(void) {
+  meta32(0u, hdr_result.sample_type);
+  meta32(4u, hdr_result.alpha_mode);
+  meta32(8u, hdr_result.color_authority);
+  meta32(12u, (uint32_t)(uintptr_t)hdr_result.icc);
+  meta32(16u, (uint32_t)hdr_result.icc_size);
+  meta32(20u, hdr_result.has_cicp);
+  meta16(24u, hdr_result.color_primaries);
+  meta16(26u, hdr_result.transfer_characteristics);
+  meta16(28u, hdr_result.matrix_coefficients);
+  hdr_metadata[30] = hdr_result.full_range;
+  meta32(32u, hdr_result.has_mastering_display);
+  for (size_t i = 0; i < 3u; ++i) {
+    meta16(36u + i * 4u, hdr_result.primary_x[i]);
+    meta16(38u + i * 4u, hdr_result.primary_y[i]);
+  }
+  meta16(48u, hdr_result.white_x);
+  meta16(50u, hdr_result.white_y);
+  meta32(52u, hdr_result.max_luminance);
+  meta32(56u, hdr_result.min_luminance);
+  meta32(60u, hdr_result.has_content_light);
+  meta16(64u, hdr_result.max_cll);
+  meta16(66u, hdr_result.max_fall);
+  hdr_metadata_size = (uint32_t)sizeof(hdr_metadata);
+}
+
+int qlic_decode_wide(uint32_t ptr, uint32_t n) {
+  clear_result();
+  last_error[0] = 0;
+  if (!input_valid(ptr, n))
+    return 0;
+  if (!dec_wide_qlic_limited((const uint8_t *)(uintptr_t)ptr, (size_t)n,
+                             &wide_result, 0, &decode_limits)) {
+    core_error("QLIC wide decode failed.");
+    return 0;
+  }
+  if (wide_result.pixels_size > UINT32_MAX || wide_result.stride > UINT32_MAX) {
+    set_error("QLIC wide output is too large.");
+    return 0;
+  }
+  sample_result = &wide_result;
+  return 1;
+}
+
+int qlic_decode_hdr(uint32_t ptr, uint32_t n) {
+  clear_result();
+  last_error[0] = 0;
+  if (!input_valid(ptr, n))
+    return 0;
+  if (!dec_hdr_qlic_limited((const uint8_t *)(uintptr_t)ptr, (size_t)n,
+                            &hdr_result, 0, &decode_limits)) {
+    core_error("QLIC HDR decode failed.");
+    return 0;
+  }
+  if (hdr_result.wide.pixels_size > UINT32_MAX ||
+      hdr_result.wide.stride > UINT32_MAX || hdr_result.icc_size > UINT32_MAX) {
+    set_error("QLIC HDR output is too large.");
+    return 0;
+  }
+  sample_result = &hdr_result.wide;
+  make_hdr_metadata();
+  return 1;
+}
+
+uint32_t qlic_sample_width(void) {
+  return sample_result ? sample_result->width : 0u;
+}
+
+uint32_t qlic_sample_height(void) {
+  return sample_result ? sample_result->height : 0u;
+}
+
+uint32_t qlic_sample_channels(void) {
+  return sample_result ? sample_result->channels : 0u;
+}
+
+uint32_t qlic_sample_bits(void) {
+  return sample_result ? sample_result->bits_per_sample : 0u;
+}
+
+uint32_t qlic_sample_ptr(void) {
+  return sample_result ? (uint32_t)(uintptr_t)sample_result->pixels : 0u;
+}
+
+uint32_t qlic_sample_size(void) {
+  return sample_result ? (uint32_t)sample_result->pixels_size : 0u;
+}
+
+uint32_t qlic_sample_stride(void) {
+  return sample_result ? (uint32_t)sample_result->stride : 0u;
+}
+
+uint32_t qlic_hdr_metadata_ptr(void) {
+  return hdr_metadata_size ? (uint32_t)(uintptr_t)hdr_metadata : 0u;
+}
+
+uint32_t qlic_hdr_metadata_size(void) { return hdr_metadata_size; }
+
+uint32_t qlic_hdr_block_count(void) {
+  return hdr_metadata_size ? hdr_result.metadata_count : 0u;
+}
+
+uint32_t qlic_hdr_block_tag(uint32_t index) {
+  if (!hdr_metadata_size || index >= hdr_result.metadata_count)
+    return 0u;
+  const uint8_t *tag = hdr_result.metadata[index].tag;
+  return (uint32_t)tag[0] | (uint32_t)tag[1] << 8u |
+         (uint32_t)tag[2] << 16u | (uint32_t)tag[3] << 24u;
+}
+
+uint32_t qlic_hdr_block_ptr(uint32_t index) {
+  return !hdr_metadata_size || index >= hdr_result.metadata_count
+             ? 0u
+             : (uint32_t)(uintptr_t)hdr_result.metadata[index].data;
+}
+
+uint32_t qlic_hdr_block_size(uint32_t index) {
+  if (!hdr_metadata_size || index >= hdr_result.metadata_count ||
+      hdr_result.metadata[index].size > UINT32_MAX)
+    return 0u;
+  return (uint32_t)hdr_result.metadata[index].size;
+}
+
 int qlic_decode(uint32_t ptr, uint32_t n) {
   clear_result();
   last_error[0] = 0;
-  if (!ptr || !n) {
-    set_error("empty input");
+  if (!input_valid(ptr, n)) {
     return 0;
   }
   const uint8_t *data = (const uint8_t *)(uintptr_t)ptr;
   Head h = {0};
-  if (!rd_head(data, (size_t)n, &h))
+  if (!read_head(data, (size_t)n, &h))
     return 0;
   if (h.mode == MODE_ANIM) {
     size_t comp_size = (size_t)h.compressed_size;
@@ -3003,6 +3415,19 @@ int qlic_decode(uint32_t ptr, uint32_t n) {
   return 1;
 }
 
+int qlic_validate(uint32_t ptr, uint32_t n) {
+  if (!input_valid(ptr, n) || n <= 12u)
+    return 0;
+  const uint8_t *input = (const uint8_t *)(uintptr_t)ptr;
+  int ok = input[12] == MODE_NATIVE_WIDE
+               ? qlic_decode_wide(ptr, n)
+           : input[12] == MODE_HDR_WIDE ? qlic_decode_hdr(ptr, n)
+                                        : qlic_decode(ptr, n);
+  if (ok)
+    qlic_reset();
+  return ok;
+}
+
 uint32_t qlic_width(void) { return image_width; }
 
 uint32_t qlic_height(void) { return image_height; }
@@ -3026,6 +3451,7 @@ uint32_t qlic_frame_delay(uint32_t i) {
 }
 
 uint32_t qlic_frame_ptr(uint32_t i) {
+  // cppcheck-suppress CastAddressToIntegerAtReturn
   return i < frame_count ? (uint32_t)(uintptr_t)frames[i].rgba : 0;
 }
 
@@ -3036,4 +3462,7 @@ uint32_t qlic_frame_size(uint32_t i) {
   return n > 0xffffffffull ? 0 : (uint32_t)n;
 }
 
-uint32_t qlic_error_ptr(void) { return (uint32_t)(uintptr_t)last_error; }
+uint32_t qlic_error_ptr(void) {
+  // cppcheck-suppress CastAddressToIntegerAtReturn
+  return (uint32_t)(uintptr_t)last_error;
+}

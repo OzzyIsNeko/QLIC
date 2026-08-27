@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <qlic/qlic.h>
 
 #include "parallel.h"
@@ -17,6 +19,7 @@
 #endif
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -39,6 +42,7 @@ typedef struct {
   const char **values;
   int count;
   uint32_t threads;
+  int has_threads;
 } Arguments;
 
 typedef struct {
@@ -102,15 +106,43 @@ static int read_file(const char *path, uint8_t **data, size_t *size) {
   return 1;
 }
 
-static int write_file(const char *path, const uint8_t *data, size_t size) {
+static FILE *open_temporary(const char *path, char **temporary) {
+  *temporary = NULL;
   size_t path_size = strlen(path);
-  if (path_size > SIZE_MAX - 40u)
-    return 0;
-  char *temporary = (char *)malloc(path_size + 40u);
-  if (!temporary)
-    return 0;
-  snprintf(temporary, path_size + 40u, "%s.tmp.%ld", path, (long)getpid());
-  FILE *file = fopen(temporary, "wb");
+  if (path_size > SIZE_MAX - 64u)
+    return NULL;
+  size_t capacity = path_size + 64u;
+  char *name = (char *)malloc(capacity);
+  if (!name)
+    return NULL;
+  int descriptor = -1;
+  for (unsigned attempt = 0; attempt < 100u; ++attempt) {
+    int length = snprintf(name, capacity, "%s.tmp.%ld.%u", path,
+                          (long)getpid(), attempt);
+    if (length < 0 || (size_t)length >= capacity)
+      break;
+    descriptor = open(name, O_WRONLY | O_CREAT | O_EXCL, 0666);
+    if (descriptor >= 0 || errno != EEXIST)
+      break;
+  }
+  if (descriptor < 0) {
+    free(name);
+    return NULL;
+  }
+  FILE *file = fdopen(descriptor, "wb");
+  if (!file) {
+    close(descriptor);
+    unlink(name);
+    free(name);
+    return NULL;
+  }
+  *temporary = name;
+  return file;
+}
+
+static int write_file(const char *path, const uint8_t *data, size_t size) {
+  char *temporary = NULL;
+  FILE *file = open_temporary(path, &temporary);
   int ok = file != NULL;
   if (ok && size && fwrite(data, 1, size, file) != size)
     ok = 0;
@@ -118,7 +150,7 @@ static int write_file(const char *path, const uint8_t *data, size_t size) {
     ok = 0;
   if (ok && rename(temporary, path) != 0)
     ok = 0;
-  if (!ok)
+  if (!ok && temporary)
     unlink(temporary);
   free(temporary);
   if (!ok)
@@ -659,27 +691,30 @@ static int load_image(const char *path, InputImage *out) {
 }
 
 static int save_png(const char *path, const qlic_image *image) {
-  size_t path_size = strlen(path);
-  if (path_size > SIZE_MAX - 40u)
+  char *temporary = NULL;
+  FILE *file = open_temporary(path, &temporary);
+  if (!file) {
+    fprintf(stderr, "error: could not write %s\n", path);
     return 0;
-  char *temporary = (char *)malloc(path_size + 40u);
-  if (!temporary)
-    return 0;
-  snprintf(temporary, path_size + 40u, "%s.tmp.%ld", path, (long)getpid());
+  }
   png_image png;
   memset(&png, 0, sizeof(png));
   png.version = PNG_IMAGE_VERSION;
   png.width = image->width;
   png.height = image->height;
   png.format = PNG_FORMAT_RGBA;
-  if (!png_image_write_to_file(&png, temporary, 0, image->rgba,
-                               (png_int_32)image->stride, NULL)) {
+  int ok = png_image_write_to_stdio(&png, file, 0, image->rgba,
+                                    (png_int_32)image->stride, NULL);
+  if (!ok)
     fprintf(stderr, "error: could not write PNG: %s\n", png.message);
+  if (fclose(file) != 0)
+    ok = 0;
+  if (!ok) {
     unlink(temporary);
     free(temporary);
     return 0;
   }
-  int ok = rename(temporary, path) == 0;
+  ok = rename(temporary, path) == 0;
   if (!ok) {
     fprintf(stderr, "error: could not write %s\n", path);
     unlink(temporary);
@@ -708,14 +743,19 @@ static int arguments(int argc, char **argv, Arguments *out) {
   if (!out->values)
     return 0;
   out->threads = 1u;
+  int options = 1;
   for (int i = 2; i < argc; ++i) {
-    if (strcmp(argv[i], "--threads") == 0) {
-      if (++i >= argc || !parse_threads(argv[i], &out->threads)) {
+    if (options && strcmp(argv[i], "--") == 0) {
+      options = 0;
+    } else if (options && strcmp(argv[i], "--threads") == 0) {
+      if (out->has_threads || ++i >= argc ||
+          !parse_threads(argv[i], &out->threads)) {
         fprintf(stderr, "error: invalid --threads option\n");
         free(out->values);
         return 0;
       }
-    } else if (argv[i][0] == '-') {
+      out->has_threads = 1;
+    } else if (options && argv[i][0] == '-') {
       fprintf(stderr, "error: unknown option %s\n", argv[i]);
       free(out->values);
       return 0;
@@ -923,7 +963,7 @@ int main(int argc, char **argv) {
                  ? 0
                  : 1;
   } else if (strcmp(argv[1], "info") == 0 && args.count == 1 &&
-             args.threads == 1u) {
+             !args.has_threads) {
     result = command_info(args.values[0]);
   } else {
     fprintf(stderr, "error: invalid command or arguments\n");

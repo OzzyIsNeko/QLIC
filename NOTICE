@@ -3,8 +3,8 @@ Copyright 2026 QLIC contributors
 
 This product includes software developed by QLIC contributors.
 
-The Windows packages include decoder components from JPEG XL, Brotli, and WebP.
-Their license texts are included with the decoder files.
+The Windows packages include decoder components from JPEG XL, Brotli, Highway,
+SkCMS, and WebP. Their license texts are included with the decoder files.
 
 The LZMS decoder is a C port of the MIT licensed clean room implementation by Deployment Theory.
 Its license is in third_party/lzms/LICENSE.

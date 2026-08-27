@@ -1,0 +1,33 @@
+{
+  "name": "qlic-web",
+  "version": "1.0.0",
+  "description": "Browser-native QLIC WebAssembly codec and viewer",
+  "type": "module",
+  "module": "./qlic-web.js",
+  "types": "./qlic-web.d.ts",
+  "exports": {
+    ".": {
+      "types": "./qlic-web.d.ts",
+      "import": "./qlic-web.js",
+      "default": "./qlic-web.js"
+    },
+    "./qlic-web.wasm": "./qlic-web.wasm",
+    "./worker": "./qlic-worker.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "qlic-web.js",
+    "qlic-web.d.ts",
+    "qlic-web.wasm",
+    "qlic-worker.js",
+    "index.html",
+    "README.md",
+    "LICENSE",
+    "LICENSE-LZMS",
+    "NOTICE",
+    "SECURITY.md",
+    "SUPPORT.md"
+  ],
+  "license": "Apache-2.0 AND MIT",
+  "sideEffects": false
+}

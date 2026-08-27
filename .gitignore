@@ -2,6 +2,8 @@
 /dist/
 /release/
 /web/dist/
+/web/dist-*/
+/rust/qlic-decoder/target/
 /benchmark.json
 /benchmark/corpus/
 /benchmark/downloads/
@@ -13,6 +15,10 @@
 /CMakeUserPresets.json
 /.DS_Store
 /Thumbs.db
+__pycache__/
+*.py[cod]
+*.profraw
+*.profdata
 *.exe
 *.dll
 *.lib

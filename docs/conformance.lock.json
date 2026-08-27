@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "release": "QLIC 1.0.0",
+  "normative_decoder_sources": {
+    "codec/src/stream.c": "e3c9f07f8f0b9be58cb031ed166ee4129adc35531de9eb0c9323d5d6aad949b6",
+    "rust/qlic-decoder/src/qst1.rs": "c64507891846606548a238369e716138da8abb437b576ef6ed04b3edfc68916a"
+  },
+  "normative_data": {
+    "docs/profiles.json": "8cbcabfa08cd566ef2008d557bf16edf8b0701c14843a93c27b623493d95b338",
+    "tests/fixtures/manifest.json": "2166a585575d7becf2202e195d9ecd0bef5d7fa22f77fa913f4285dbbc4a31d8",
+    "tests/fixtures/negative-manifest.json": "7e9388f5b49fd7e029ade014ff66297346b2af1f88b0da3d5a714b260bb44ea8"
+  }
+}

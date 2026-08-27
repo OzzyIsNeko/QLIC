@@ -1,9 +1,18 @@
 # Security
 
-Report security problems privately through the GitHub Security tab.
+Report security problems privately through the GitHub Security tab. Include the
+QLIC version or source revision, a small reproducer, the decoder used, and what
+happened. If private reporting is unavailable, open an issue asking for a
+private contact. Do not post the reproducer publicly before a fix is available.
 
-Include the QLIC version, a small reproducer, and what happened. If private reporting is unavailable, open an issue asking for a private way to continue. Do not publish the details before a fix is available.
+QLIC 1.0 has no paid security response-time promise. Security fixes target the
+active release tree.
 
-QLIC treats every input as untrusted. The native, WIC, and browser decoders check limits before large allocations or decoding work. Applications using the C SDK can change those limits for each call. They should also use a time limit that makes sense for what they are doing.
+Treat every image as untrusted. Native, WIC, Rust, and browser decoders enforce
+input and output limits before large allocations where their format permits.
+Applications must choose limits for their workload and enforce a decode-time
+budget outside the library. Run network-facing decoding in a process with only
+the filesystem, memory, and CPU access it needs.
 
-Only the current release receives security fixes.
+Local packages include SHA-256 manifests and SPDX SBOMs. Verify both before
+deployment and retain the exact decoder used for stored QLIC data.

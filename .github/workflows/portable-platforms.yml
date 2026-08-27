@@ -1,0 +1,46 @@
+name: Portable platforms
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-arm64:
+    runs-on: windows-11-vs2026-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - name: Native Windows ARM64 codec and WIC suite
+        shell: pwsh
+        run: .\build.ps1 -Config Release -BuildDir build\ci-arm64 -Architecture ARM64
+
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - name: Dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Native Linux ARM64 portable codec suite
+        run: |
+          cmake -S . -B build/ci-linux-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DQLIC_BUILD_CLI=OFF -DQLIC_BUILD_WINDOWS_APPS=OFF -DQLIC_LINUX_LZMS=OFF
+          cmake --build build/ci-linux-arm64
+          ctest --test-dir build/ci-linux-arm64 --output-on-failure
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - name: Native macOS portable codec suite
+        run: |
+          cmake -S . -B build/ci-macos -DCMAKE_BUILD_TYPE=Release -DQLIC_BUILD_CLI=OFF -DQLIC_BUILD_WINDOWS_APPS=OFF -DQLIC_LINUX_LZMS=OFF
+          cmake --build build/ci-macos --parallel
+          ctest --test-dir build/ci-macos --output-on-failure
