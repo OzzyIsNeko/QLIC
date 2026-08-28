@@ -204,6 +204,10 @@
       color: #9b3f3f;
     }
 
+    .status.warning {
+      color: #91650c;
+    }
+
     .progress {
       height: 3px;
       overflow: hidden;
@@ -523,7 +527,7 @@
         type="file"
         tabindex="-1"
         aria-hidden="true"
-        accept=".qlic,image/qlic,image/png,image/webp,image/bmp,.png,.webp,.bmp"
+        accept=".qlic,image/qlic,image/*"
       >
     </section>
 
@@ -727,9 +731,10 @@
       return `${baseName(name)}${suffix}.png`;
     };
 
-    const setStatus = (message, error = false) => {
+    const setStatus = (message, tone = "") => {
       status.textContent = message;
-      status.classList.toggle("error", error);
+      status.classList.toggle("error", tone === "error");
+      status.classList.toggle("warning", tone === "warning");
     };
 
     const resetResult = () => {
@@ -834,7 +839,7 @@
           bitmap = await createImageBitmap(file);
         } catch {
           throw new Error(
-            "This browser could not decode the image. Use PNG, BMP, or lossless WebP."
+            "This browser could not decode the image."
           );
         }
       }
@@ -869,7 +874,7 @@
       if (openedAsLocalFile && !standaloneAvailable) {
         setStatus(
           "Serve this folder over HTTP or HTTPS; no QLIC executable is required.",
-          true
+          "error"
         );
         return;
       }
@@ -899,17 +904,18 @@
           setStatus(`Decoded in ${formatDuration(decodedFile.elapsed)}.`);
           return;
         }
-        if (await knownLossy(file))
-          throw new Error("This image is known to be lossy, so it was not accepted.");
-        source = { kind: "image", ...(await decodeImage(file)) };
+        const lossy = await knownLossy(file);
+        source = { kind: "image", lossy, ...(await decodeImage(file)) };
         inputDetails.textContent =
           `${source.width} × ${source.height}, original file ${formatSize(file.size)}`;
-        setStatus("Ready");
+        setStatus(lossy
+          ? "This source is lossy. QLIC preserves its decoded pixels losslessly, so the QLIC file will likely be larger."
+          : "Ready", lossy ? "warning" : "");
       } catch (error) {
         source = null;
         resetViewer();
         inputDetails.textContent = "The file could not be opened.";
-        setStatus(error.message || String(error), true);
+        setStatus(error.message || String(error), "error");
       } finally {
         setBusy(false);
       }
@@ -988,7 +994,7 @@
       inputDetails.textContent = "Open the built index.html in web/dist or dist/qlic-web.";
       setStatus(
         "This source template is not the packaged offline app. Run scripts/build-web.ps1 first.",
-        true
+        "error"
       );
     }
 
@@ -1257,11 +1263,13 @@
       try {
         const encoded = await encode(source);
         showResult(encoded);
-        setStatus("Compression complete.");
+        setStatus(source.lossy
+          ? "Compression complete. The lossy source may produce a larger QLIC file."
+          : "Compression complete.", source.lossy ? "warning" : "");
       } catch (error) {
         result.textContent = "Compression failed";
         result.classList.remove("placeholder");
-        setStatus(error.message || "Compression failed.", true);
+        setStatus(error.message || "Compression failed.", "error");
       } finally {
         setBusy(false);
       }
@@ -1283,7 +1291,7 @@
         download(png, "image/png", pngName(source.file.name));
         setStatus("PNG saved.");
       } catch (error) {
-        setStatus(error.message || "PNG export failed.", true);
+        setStatus(error.message || "PNG export failed.", "error");
       } finally {
         setBusy(false);
       }

@@ -51,6 +51,9 @@
 #define QLIC_COLOR_PROGRESS_BACKGROUND RGB(213, 230, 218)
 #define QLIC_COLOR_VIEWER RGB(223, 232, 226)
 #define QLIC_COLOR_VIEWER_BORDER RGB(202, 219, 208)
+#define QLIC_COLOR_WARNING RGB(145, 101, 12)
+#define QLIC_LOSSY_STATUS                                                     \
+  L"Lossy source \u00b7 QLIC is lossless, so the output will likely be larger."
 
 enum {
   ID_INPUT = 100,
@@ -112,6 +115,7 @@ typedef struct {
   int ok;
   int verified;
   int cancelled;
+  int lossy_source;
   wchar_t message[1024];
 } Result;
 
@@ -1342,7 +1346,10 @@ static void set_input(const wchar_t *path) {
   format_size(bytes, size_text, 64);
   StringCchPrintfW(details, 160, L"Original: %ls", size_text);
   SetWindowTextW(g_input_details, details);
-  SetWindowTextW(g_status, L"Ready");
+  int lossy = has_extension(path, L".jpg") ||
+              has_extension(path, L".jpeg") ||
+              has_extension(path, L".jpe");
+  SetWindowTextW(g_status, lossy ? QLIC_LOSSY_STATUS : L"Ready");
   clear_result();
   update_controls();
 }
@@ -1358,7 +1365,8 @@ static void choose_input(HWND window) {
   dialog.lpstrFile = path;
   dialog.nMaxFile = PATH_CAP;
   dialog.lpstrFilter =
-      L"Supported images\0*.qlic;*.png;*.webp;*.jxl;*.avif;*.bmp;*.tif;*.tiff;*.gif\0"
+      L"Supported images\0*.qlic;*.png;*.jpg;*.jpeg;*.jpe;*.webp;*.jxl;"
+      L"*.avif;*.bmp;*.tif;*.tiff;*.gif\0"
       L"QLIC images\0*.qlic\0"
       L"All files\0*.*\0";
   dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
@@ -1564,6 +1572,8 @@ static DWORD WINAPI run_process(LPVOID parameter) {
   size_t capture_used = 0;
   int packed = run_child(job, job->command, capture, sizeof(capture),
                          &capture_used, &result->milliseconds);
+  result->lossy_source =
+      strstr(capture, "warning: This source is lossy.") != NULL;
   result->cancelled =
       InterlockedCompareExchange(&g_cancel_requested, 0, 0) != 0;
   if (packed && !result->cancelled &&
@@ -2912,7 +2922,12 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
     else if (id == ID_INPUT_DETAILS || id == ID_OPTIONS_NOTE ||
              id == ID_VIEW_NOTE)
       color = QLIC_COLOR_NOTE;
-    else if (label)
+    else if (id == ID_STATUS) {
+      wchar_t text[96];
+      GetWindowTextW((HWND)lparam, text, _countof(text));
+      if (wcsstr(text, L"Lossy source"))
+        color = QLIC_COLOR_WARNING;
+    } else if (label)
       color = disabled_label ? QLIC_COLOR_DISABLED : QLIC_COLOR_LABEL;
     if (id == ID_ICC_PATH) {
       SetBkColor((HDC)wparam, QLIC_COLOR_FIELD);
@@ -3306,7 +3321,9 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
     if (result && result->ok) {
       wcscpy_s(g_temp_output, PATH_CAP, result->output);
       show_result(result);
-      SetWindowTextW(g_status, L"Compression complete.");
+      SetWindowTextW(g_status, result->lossy_source
+                                   ? QLIC_LOSSY_STATUS
+                                   : L"Compression complete.");
       EnableWindow(g_save, TRUE);
     } else if (result && result->cancelled) {
       set_result_heading(L"Cancelled", 0);

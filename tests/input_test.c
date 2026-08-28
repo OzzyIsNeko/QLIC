@@ -9,6 +9,7 @@ typedef struct {
   const wchar_t *name;
   int accepted;
   QlicInputDecoder decoder;
+  int lossy;
 } Case;
 
 static uint32_t read32be(const uint8_t *data) {
@@ -185,7 +186,7 @@ static int check_case(const wchar_t *directory, const Case *test,
   if (!qlic_input_open_memory(input.data, input.size, UINT64_C(16777216),
                               UINT64_C(1048576), &memory, memory_error,
                               sizeof(memory_error)) ||
-      memory.decoder != test->decoder) {
+      memory.decoder != test->decoder || memory.lossy != test->lossy) {
     fwprintf(stderr, L"%ls: memory input failed: %hs\n", test->name,
              memory_error);
     qlic_input_close(&memory);
@@ -193,8 +194,8 @@ static int check_case(const wchar_t *directory, const Case *test,
     return 0;
   }
   qlic_input_close(&memory);
-  if (input.decoder != test->decoder) {
-    fwprintf(stderr, L"%ls: wrong decoder\n", test->name);
+  if (input.decoder != test->decoder || input.lossy != test->lossy) {
+    fwprintf(stderr, L"%ls: wrong decoder or lossiness flag\n", test->name);
     qlic_input_close(&input);
     return 0;
   }
@@ -215,22 +216,22 @@ int wmain(int argc, wchar_t **argv) {
   if (argc != 2)
     return 2;
   static const Case cases[] = {
-      {L"base.png", 1, QLIC_INPUT_WIC},
-      {L"base.bmp", 1, QLIC_INPUT_WIC},
-      {L"lossless.tiff", 1, QLIC_INPUT_WIC},
-      {L"lossless.avif", 1, QLIC_INPUT_WIC},
+      {L"base.png", 1, QLIC_INPUT_WIC, 0},
+      {L"base.bmp", 1, QLIC_INPUT_WIC, 0},
+      {L"lossless.tiff", 1, QLIC_INPUT_WIC, 0},
+      {L"lossless.avif", 1, QLIC_INPUT_WIC, 0},
 #ifdef QLIC_TEST_BUNDLED_IMAGE_CODECS
-      {L"lossless.webp", 1, QLIC_INPUT_WEBP},
-      {L"lossless.jxl", 1, QLIC_INPUT_JXL},
+      {L"lossless.webp", 1, QLIC_INPUT_WEBP, 0},
+      {L"lossless.jxl", 1, QLIC_INPUT_JXL, 0},
 #endif
-      {L"lossy.jpg", 0, QLIC_INPUT_WIC},
-      {L"lossy.tiff", 0, QLIC_INPUT_WIC},
-      {L"lossy.avif", 0, QLIC_INPUT_WIC},
+      {L"lossy.jpg", 1, QLIC_INPUT_WIC, 1},
+      {L"lossy.tiff", 1, QLIC_INPUT_WIC, 1},
+      {L"lossy.avif", 1, QLIC_INPUT_WIC, 1},
 #ifdef QLIC_TEST_BUNDLED_IMAGE_CODECS
-      {L"lossy.webp", 0, QLIC_INPUT_WEBP},
-      {L"lossy.jxl", 0, QLIC_INPUT_JXL},
+      {L"lossy.webp", 1, QLIC_INPUT_WEBP, 1},
+      {L"lossy.jxl", 1, QLIC_INPUT_JXL, 1},
 #endif
-      {L"high16.png", 1, QLIC_INPUT_WIC},
+      {L"high16.png", 1, QLIC_INPUT_WIC, 0},
   };
   int ok = 1;
   for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); ++index)
@@ -254,8 +255,8 @@ int wmain(int argc, wchar_t **argv) {
 
 #ifdef QLIC_TEST_BUNDLED_IMAGE_CODECS
   QlicInputImage webp = {0}, jxl = {0};
-  const Case webp_case = {L"lossless.webp", 1, QLIC_INPUT_WEBP};
-  const Case jxl_case = {L"lossless.jxl", 1, QLIC_INPUT_JXL};
+  const Case webp_case = {L"lossless.webp", 1, QLIC_INPUT_WEBP, 0};
+  const Case jxl_case = {L"lossless.jxl", 1, QLIC_INPUT_JXL, 0};
   ok &= check_case(argv[1], &webp_case, &webp);
   ok &= check_case(argv[1], &jxl_case, &jxl);
   if (!webp.rgba || !jxl.rgba ||

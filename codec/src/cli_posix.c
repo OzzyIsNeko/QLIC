@@ -36,6 +36,7 @@ typedef struct {
   uint8_t *rgba;
   uint32_t width;
   uint32_t height;
+  int lossy;
 } InputImage;
 
 typedef struct {
@@ -217,10 +218,7 @@ static int load_bmp(const uint8_t *data, size_t size, InputImage *out) {
          (indexed || depth == 24u || depth == 32u)) ||
         (compression == 1u && depth == 8u) ||
         (compression == 2u && depth == 4u))) {
-    fprintf(stderr,
-            compression == 4u
-                ? "error: lossy JPEG compressed BMP images are not accepted\n"
-                : "error: unsupported BMP pixel format\n");
+    fprintf(stderr, "error: unsupported BMP pixel format\n");
     return 0;
   }
   size_t bytes = 0;
@@ -421,11 +419,8 @@ static int load_webp(const uint8_t *data, size_t size, InputImage *out) {
     fprintf(stderr, "error: invalid WebP\n");
     return 0;
   }
-  if (features.format == 1) {
-    fprintf(stderr, "error: lossy WebP images are not accepted\n");
-    return 0;
-  }
-  if (features.format != 2 || features.has_animation) {
+  if ((features.format != 1 && features.format != 2) ||
+      features.has_animation) {
     fprintf(stderr, "error: unsupported WebP image\n");
     return 0;
   }
@@ -442,12 +437,13 @@ static int load_webp(const uint8_t *data, size_t size, InputImage *out) {
   }
   if (!WebPDecodeRGBAInto(data, size, rgba, bytes, features.width * 4)) {
     free(rgba);
-    fprintf(stderr, "error: invalid lossless WebP\n");
+    fprintf(stderr, "error: invalid WebP\n");
     return 0;
   }
   out->rgba = rgba;
   out->width = (uint32_t)features.width;
   out->height = (uint32_t)features.height;
+  out->lossy = features.format == 1;
   return 1;
 }
 #endif
@@ -478,7 +474,7 @@ static int load_jxl(const uint8_t *data, size_t size, InputImage *out) {
         break;
       size_t expected = 0;
       if (!dimensions(info.xsize, info.ysize, &expected) ||
-          !info.uses_original_profile || info.bits_per_sample > 8u ||
+          info.bits_per_sample > 8u ||
           info.exponent_bits_per_sample || info.alpha_bits > 8u ||
           info.alpha_exponent_bits ||
           (info.num_color_channels != 1u &&
@@ -488,12 +484,10 @@ static int load_jxl(const uint8_t *data, size_t size, InputImage *out) {
           JxlDecoderImageOutBufferSize(decoder, &format, &bytes) !=
               JXL_DEC_SUCCESS ||
           bytes != expected) {
-        fprintf(stderr,
-                !info.uses_original_profile
-                    ? "error: lossy JPEG XL images are not accepted\n"
-                    : "error: unsupported JPEG XL image\n");
+        fprintf(stderr, "error: unsupported JPEG XL image\n");
         break;
       }
+      out->lossy = !info.uses_original_profile;
     } else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
       rgba = (uint8_t *)malloc(bytes);
       if (!rgba ||
@@ -534,17 +528,18 @@ static int load_avif(const uint8_t *data, size_t size, InputImage *out) {
     fprintf(stderr, "error: invalid AVIF\n");
     return 0;
   }
-  if (image->depth > 8u ||
+  if (image->depth > 8u) {
+    avifImageDestroy(image);
+    avifDecoderDestroy(decoder);
+    fprintf(stderr, "error: AVIF images above 8 bits are unsupported\n");
+    return 0;
+  }
+  out->lossy =
       (image->yuvFormat != AVIF_PIXEL_FORMAT_YUV444 &&
        image->yuvFormat != AVIF_PIXEL_FORMAT_YUV400) ||
       image->yuvRange != AVIF_RANGE_FULL ||
       (image->yuvFormat != AVIF_PIXEL_FORMAT_YUV400 &&
-       image->matrixCoefficients != AVIF_MATRIX_COEFFICIENTS_IDENTITY)) {
-    avifImageDestroy(image);
-    avifDecoderDestroy(decoder);
-    fprintf(stderr, "error: lossy or unsupported AVIF images are not accepted\n");
-    return 0;
-  }
+       image->matrixCoefficients != AVIF_MATRIX_COEFFICIENTS_IDENTITY);
   size_t bytes = 0;
   if (!dimensions(image->width, image->height, &bytes)) {
     avifImageDestroy(image);
@@ -598,13 +593,9 @@ static int load_tiff(const char *path, InputImage *out) {
   (void)TIFFGetFieldDefaulted(tiff, TIFFTAG_COMPRESSION, &compression);
   size_t bytes = 0;
   if (!tags || bits > 8u || sample_format != SAMPLEFORMAT_UINT ||
-      compression == COMPRESSION_JPEG ||
       !dimensions(width, height, &bytes)) {
     TIFFClose(tiff);
-    fprintf(stderr,
-            compression == COMPRESSION_JPEG
-                ? "error: lossy JPEG compressed TIFF images are not accepted\n"
-                : "error: unsupported TIFF image\n");
+    fprintf(stderr, "error: unsupported TIFF image\n");
     return 0;
   }
   if (bytes > (size_t)PTRDIFF_MAX) {
@@ -634,6 +625,7 @@ static int load_tiff(const char *path, InputImage *out) {
   out->rgba = rgba;
   out->width = width;
   out->height = height;
+  out->lossy = compression == COMPRESSION_JPEG;
   return 1;
 }
 #endif
@@ -659,7 +651,7 @@ static int load_image(const char *path, InputImage *out) {
     ok = load_bmp(data, size, out);
   } else if (size >= 3u && data[0] == 0xffu && data[1] == 0xd8u &&
              data[2] == 0xffu) {
-    fprintf(stderr, "error: lossy JPEG images are not accepted\n");
+    fprintf(stderr, "error: JPEG input is unavailable in this build\n");
 #ifdef QLIC_HAVE_WEBP
   } else if (size >= 12u && memcmp(data, "RIFF", 4u) == 0 &&
              memcmp(data + 8u, "WEBP", 4u) == 0) {
@@ -771,6 +763,11 @@ static int pack_file(const char *input, const char *output,
   InputImage image;
   if (!load_image(input, &image))
     return 0;
+  if (image.lossy) {
+    fprintf(stderr,
+            "warning: This source is lossy. QLIC preserves its decoded pixels "
+            "losslessly, so the QLIC file will likely be larger.\n");
+  }
   qlic_encode_options options;
   qlic_encode_options_default(&options);
   options.threads = threads;

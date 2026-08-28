@@ -13188,6 +13188,11 @@ static int cmd_pack(int argc, wchar_t **argv) {
     set_err("%s", input_error[0] ? input_error : "unsupported input image");
     return 1;
   }
+  if (input.lossy) {
+    fprintf(stderr,
+            "warning: This source is lossy. QLIC preserves its decoded pixels "
+            "losslessly, so the QLIC file will likely be larger.\n");
+  }
   if (input.decoder == QLIC_INPUT_WIC && !input.icc_size &&
       color.color_authority == QSW2_COLOR_UNSPECIFIED) {
     Buf embedded_icc = {0};

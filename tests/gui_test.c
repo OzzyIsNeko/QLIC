@@ -110,9 +110,10 @@ static int wait_for_top(HWND window, int target, int increasing) {
 }
 
 int wmain(int argc, wchar_t **argv) {
-  if (argc != 2 && argc != 4) {
+  if (argc != 2 && argc != 3 && argc != 4) {
     fprintf(stderr,
-            "usage: qlic-gui-test <qlic-gui.exe> [image.qlic expected-size]\n");
+            "usage: qlic-gui-test <qlic-gui.exe> "
+            "[lossy-image | image.qlic expected-size]\n");
     return 2;
   }
 
@@ -128,7 +129,7 @@ int wmain(int argc, wchar_t **argv) {
     return 2;
   }
   wchar_t fixture[32768] = {0};
-  if (argc == 4) {
+  if (argc >= 3) {
     DWORD fixture_length = GetFullPathNameW(argv[2], 32768, fixture, NULL);
     if (!fixture_length || fixture_length >= 32768) {
       fprintf(stderr, "QLIC GUI test fixture path is invalid\n");
@@ -136,12 +137,12 @@ int wmain(int argc, wchar_t **argv) {
     }
   }
   wchar_t command[32768] = {0};
-  if (argc == 4 && FAILED(StringCchPrintfW(command, 32768, L"\"%ls\" \"%ls\"",
+  if (argc >= 3 && FAILED(StringCchPrintfW(command, 32768, L"\"%ls\" \"%ls\"",
                                            executable, fixture))) {
     fprintf(stderr, "QLIC GUI test command is too long\n");
     return 2;
   }
-  if (!CreateProcessW(executable, argc == 4 ? command : NULL, NULL, NULL, FALSE, 0,
+  if (!CreateProcessW(executable, argc >= 3 ? command : NULL, NULL, NULL, FALSE, 0,
                       NULL, NULL, &startup, &process)) {
     fprintf(stderr, "QLIC GUI test could not start the GUI: %lu\n",
             GetLastError());
@@ -244,6 +245,17 @@ int wmain(int argc, wchar_t **argv) {
       ok &= expect(wcscmp(text, L"Play") == 0,
                     "animation playback did not pause");
     }
+    PostMessageW(window, WM_CLOSE, 0, 0);
+  } else if (window && argc == 3) {
+    HWND output = GetDlgItem(window, ID_OUTPUT);
+    HWND status = output ? GetDlgItem(output, ID_STATUS) : NULL;
+    int warned = status && wait_for_text(status, L"Lossy source");
+    if (status && !warned) {
+      wchar_t text[256];
+      GetWindowTextW(status, text, 256);
+      fwprintf(stderr, L"QLIC GUI status: %ls\n", text);
+    }
+    ok &= expect(warned, "lossy input warning did not appear");
     PostMessageW(window, WM_CLOSE, 0, 0);
   } else if (window) {
     HWND output = GetDlgItem(window, ID_OUTPUT);
@@ -418,6 +430,7 @@ int wmain(int argc, wchar_t **argv) {
   if (!ok)
     return 1;
   puts(argc == 4 ? "QLIC GUI viewer test passed"
-                 : "QLIC GUI resize and selector test passed");
+                 : argc == 3 ? "QLIC GUI lossy warning test passed"
+                             : "QLIC GUI resize and selector test passed");
   return 0;
 }

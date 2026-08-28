@@ -335,8 +335,8 @@ static int png_has_transparency(const uint8_t *data, size_t size) {
   return 0;
 }
 
-static int check_bmp(const uint8_t *data, size_t size, char *error,
-                     size_t error_capacity) {
+static int check_bmp(const uint8_t *data, size_t size, int *lossy,
+                     char *error, size_t error_capacity) {
   if (size < 26) {
     set_error(error, error_capacity, "the BMP header is invalid");
     return 0;
@@ -355,15 +355,15 @@ static int check_bmp(const uint8_t *data, size_t size, char *error,
   }
   uint16_t depth = le16(data + 28);
   uint32_t compression = le32(data + 30);
-  if (!depth || depth > 32 ||
+  int jpeg = compression == 4;
+  if ((!depth && !jpeg) || depth > 32 ||
       (compression != 0 && compression != 1 && compression != 2 &&
-       compression != 3 && compression != 6)) {
-    set_error(error, error_capacity,
-              compression == 4
-                  ? "lossy JPEG compressed BMP images are not accepted"
-                  : "the BMP pixel format is unsupported");
+       compression != 3 && compression != 4 && compression != 6)) {
+    set_error(error, error_capacity, "the BMP pixel format is unsupported");
     return 0;
   }
+  if (lossy)
+    *lossy = jpeg;
   return 1;
 }
 
@@ -387,8 +387,8 @@ static int tiff_range(uint64_t offset, uint64_t length, size_t size) {
   return offset <= size && length <= size - (size_t)offset;
 }
 
-static int check_tiff(const uint8_t *data, size_t size, char *error,
-                      size_t error_capacity) {
+static int check_tiff(const uint8_t *data, size_t size, int *lossy,
+                      char *error, size_t error_capacity) {
   if (size < 8 ||
       !((data[0] == 'I' && data[1] == 'I') ||
         (data[0] == 'M' && data[1] == 'M'))) {
@@ -469,11 +469,8 @@ static int check_tiff(const uint8_t *data, size_t size, char *error,
         }
       }
     }
-    if (compression == 6 || compression == 7) {
-      set_error(error, error_capacity,
-                "lossy JPEG compressed TIFF images are not accepted");
-      return 0;
-    }
+    if (lossy && (compression == 6 || compression == 7))
+      *lossy = 1;
     const uint8_t *next =
         entries + (size_t)count * entry_bytes;
     offset = big ? tiff64(next, little) : tiff32(next, little);
@@ -547,14 +544,15 @@ static int inspect_tiff_layout(const uint8_t *data, size_t size,
   return *channels == 1u || *channels == 3u || *channels == 4u;
 }
 
-static int check_webp(const uint8_t *data, size_t size, char *error,
-                      size_t error_capacity) {
+static int check_webp(const uint8_t *data, size_t size, int *lossy,
+                      char *error, size_t error_capacity) {
   if (size < 20 || memcmp(data, "RIFF", 4) ||
       memcmp(data + 8, "WEBP", 4)) {
     set_error(error, error_capacity, "the WebP header is invalid");
     return 0;
   }
-  int lossless = 0;
+  int lossy_images = 0;
+  int lossless_images = 0;
   for (size_t offset = 12; offset + 8 <= size;) {
     uint32_t chunk_size = le32(data + offset + 4);
     size_t payload = offset + 8u;
@@ -562,11 +560,8 @@ static int check_webp(const uint8_t *data, size_t size, char *error,
       set_error(error, error_capacity, "the WebP chunks are invalid");
       return 0;
     }
-    if (!memcmp(data + offset, "VP8 ", 4)) {
-      set_error(error, error_capacity,
-                "lossy WebP images are not accepted");
-      return 0;
-    }
+    if (!memcmp(data + offset, "VP8 ", 4))
+      ++lossy_images;
     if (!memcmp(data + offset, "ANIM", 4) ||
         !memcmp(data + offset, "ANMF", 4)) {
       set_error(error, error_capacity,
@@ -574,17 +569,18 @@ static int check_webp(const uint8_t *data, size_t size, char *error,
       return 0;
     }
     if (!memcmp(data + offset, "VP8L", 4))
-      ++lossless;
+      ++lossless_images;
     size_t padded = (size_t)chunk_size + ((size_t)chunk_size & 1u);
     if (padded > size - payload)
       break;
     offset = payload + padded;
   }
-  if (lossless != 1) {
-    set_error(error, error_capacity,
-              "the WebP image is not tagged as lossless");
+  if (lossy_images + lossless_images != 1) {
+    set_error(error, error_capacity, "the WebP image payload is unsupported");
     return 0;
   }
+  if (lossy)
+    *lossy = lossy_images != 0;
   return 1;
 }
 
@@ -683,8 +679,8 @@ static int looks_like_avif(const uint8_t *data, size_t size) {
            (fourcc(data + 16, "avif") || fourcc(data + 16, "avis"))));
 }
 
-static int check_avif(const uint8_t *data, size_t size, char *error,
-                      size_t error_capacity) {
+static int check_avif(const uint8_t *data, size_t size, int *lossy,
+                      char *error, size_t error_capacity) {
   AvifCheck check = {0};
   if (!scan_avif_boxes(data, size, 0, &check) || !check.avif_brand ||
       !check.av1_config) {
@@ -693,14 +689,11 @@ static int check_avif(const uint8_t *data, size_t size, char *error,
   }
   if (check.bad_depth) {
     set_error(error, error_capacity,
-              "only 8 bit AVIF without chroma subsampling is accepted");
+              "only 8 bit AVIF is accepted");
     return 0;
   }
-  if (check.lossy_color) {
-    set_error(error, error_capacity,
-              "lossy AVIF color encoding is not accepted");
-    return 0;
-  }
+  if (lossy)
+    *lossy = check.lossy_color;
   return 1;
 }
 
@@ -991,11 +984,6 @@ static int valid_jxl_info(const JxlBasicInfo *info, uint64_t max_pixels,
     set_error(error, error_capacity, "the JPEG XL dimensions are too large");
     return 0;
   }
-  if (!info->uses_original_profile) {
-    set_error(error, error_capacity,
-              "lossy JPEG XL images are not accepted");
-    return 0;
-  }
   if (info->bits_per_sample > 8 || info->exponent_bits_per_sample ||
       info->alpha_bits > 8 || info->alpha_exponent_bits) {
     set_error(error, error_capacity,
@@ -1019,7 +1007,7 @@ static int valid_jxl_info(const JxlBasicInfo *info, uint64_t max_pixels,
 }
 
 static int inspect_jxl(const uint8_t *data, size_t size, uint64_t max_pixels,
-                       char *error, size_t error_capacity) {
+                       int *lossy, char *error, size_t error_capacity) {
   JxlApi api;
   if (!load_jxl(&api, error, error_capacity))
     return 0;
@@ -1036,6 +1024,8 @@ static int inspect_jxl(const uint8_t *data, size_t size, uint64_t max_pixels,
     if (status == JXL_DEC_BASIC_INFO) {
       ok = api.basic_info(decoder, &info) == JXL_DEC_SUCCESS &&
            valid_jxl_info(&info, max_pixels, error, error_capacity);
+      if (ok && lossy)
+        *lossy = !info.uses_original_profile;
       break;
     }
     if (status == JXL_DEC_ERROR || status == JXL_DEC_NEED_MORE_INPUT ||
@@ -1071,7 +1061,8 @@ static int decode_webp(const QlicInput *input, uint64_t max_pixels,
   int ok = get_features && decode &&
            get_features(input->data, input->size, &features,
                         WEBP_DECODER_ABI_VERSION) == 0 &&
-           features.format == 2 && !features.has_animation &&
+           (features.format == 1 || features.format == 2) &&
+           !features.has_animation &&
            features.width > 0 && features.height > 0;
   uint64_t pixels =
       ok ? (uint64_t)features.width * (uint64_t)features.height : 0;
@@ -1080,7 +1071,7 @@ static int decode_webp(const QlicInput *input, uint64_t max_pixels,
     FreeLibrary(module);
     set_error(error, error_capacity,
               ok ? "the WebP dimensions are too large"
-                 : "the lossless WebP image is invalid");
+                 : "the WebP image is invalid");
     return 0;
   }
   size_t bytes = (size_t)pixels * 4u;
@@ -1187,13 +1178,13 @@ static int inspect_input(QlicInput *input, uint64_t max_pixels, char *error,
              (!memcmp(data, "GIF87a", 6) || !memcmp(data, "GIF89a", 6))) {
     ok = 1;
   } else if (size >= 2 && data[0] == 'B' && data[1] == 'M') {
-    ok = check_bmp(data, size, error, error_capacity);
+    ok = check_bmp(data, size, &input->lossy, error, error_capacity);
   } else if (size >= 4 &&
              ((!memcmp(data, "II*\0", 4)) ||
               (!memcmp(data, "MM\0*", 4)) ||
               (!memcmp(data, "II+\0", 4)) ||
               (!memcmp(data, "MM\0+", 4)))) {
-    ok = check_tiff(data, size, error, error_capacity);
+    ok = check_tiff(data, size, &input->lossy, error, error_capacity);
     if (ok)
       ok = inspect_tiff_layout(data, size, &input->channels,
                                &input->bits_per_sample, &input->alpha_mode);
@@ -1201,23 +1192,24 @@ static int inspect_input(QlicInput *input, uint64_t max_pixels, char *error,
       ok = collect_tiff_metadata(input, error, error_capacity);
   } else if (size >= 12 && !memcmp(data, "RIFF", 4) &&
              !memcmp(data + 8, "WEBP", 4)) {
-    ok = check_webp(data, size, error, error_capacity);
+    ok = check_webp(data, size, &input->lossy, error, error_capacity);
     if (ok)
       ok = collect_webp_metadata(input, error, error_capacity);
     input->decoder = QLIC_INPUT_WEBP;
   } else if (jxl_signature(data, size)) {
-    ok = inspect_jxl(data, size, max_pixels, error, error_capacity);
+    ok = inspect_jxl(data, size, max_pixels, &input->lossy, error,
+                     error_capacity);
     if (ok)
       ok = collect_jxl_metadata(input, error, error_capacity);
     input->decoder = QLIC_INPUT_JXL;
   } else if (looks_like_avif(data, size)) {
-    ok = check_avif(data, size, error, error_capacity);
+    ok = check_avif(data, size, &input->lossy, error, error_capacity);
   } else if (size >= 3 && data[0] == 0xff && data[1] == 0xd8 &&
              data[2] == 0xff) {
-    set_error(error, error_capacity, "lossy JPEG images are not accepted");
+    input->lossy = 1;
+    ok = 1;
   } else {
-    set_error(error, error_capacity,
-              "the input format is unsupported or cannot be verified as lossless");
+    set_error(error, error_capacity, "the input format is unsupported");
   }
   if (!ok)
     qlic_input_close(input);

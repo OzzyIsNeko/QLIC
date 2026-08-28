@@ -27,6 +27,8 @@ typedef struct {
   uint32_t bits_per_sample;
   /* 0 none/unknown, 1 straight/unassociated, 2 premultiplied/associated. */
   uint32_t alpha_mode;
+  /* The source container or color representation is known to be lossy. */
+  int lossy;
   const uint8_t *icc;
   size_t icc_size;
   uint8_t *owned_icc;

@@ -94,9 +94,10 @@ association. Exact sidecars are also written, including duplicate or
 destination-incompatible records. Premultiplied samples export only to
 associated-alpha TIFF; PNG export fails instead of changing the samples.
 
-Windows and Linux import PNG, lossless WebP, lossless JPEG XL, TIFF, and BMP
-when their loaders are present. Linux also imports lossless AVIF. Windows can
-use installed WIC decoders. Lossy input is rejected.
+Windows and Linux import PNG, WebP, JPEG XL, TIFF, and BMP when their loaders
+are present. Linux also imports AVIF. Windows can use installed WIC decoders,
+including the system JPEG and GIF decoders. Known lossy sources are accepted
+with a warning that the QLIC file will likely be larger.
 
 ## C library
 

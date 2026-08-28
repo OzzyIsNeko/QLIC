@@ -88,21 +88,36 @@ if ($status -ne 0 -and !$avifDecoderAvailable -and
   throw "QLIC rejected an image with ambiguous losslessness metadata."
 }
 
-$rejected = @(
+$lossy = @(
   "lossy.jpg",
   "lossy.tiff",
   "lossy.avif"
 )
 if (!$SkipBundledImageCodecs) {
-  $rejected += "lossy.webp", "lossy.jxl"
+  $lossy += "lossy.webp", "lossy.jxl"
 }
-foreach ($name in $rejected) {
+foreach ($name in $lossy) {
   $encoded = Join-Path $Output "$name.qlic"
   [IO.File]::Delete($encoded)
-  & $Qlic pack (Join-Path $Fixtures $name) $encoded --threads 1 2>&1 |
-    Out-Null
-  if ($LASTEXITCODE -eq 0 -or (Test-Path -LiteralPath $encoded)) {
-    throw "QLIC accepted unsupported or lossy input: $name"
+  $message = @(
+    & $Qlic pack (Join-Path $Fixtures $name) $encoded --threads 1 2>&1
+  )
+  $status = $LASTEXITCODE
+  if ($status -ne 0 -and $name -eq "lossy.avif" -and
+      (Test-WicAvifUnavailable $message)) {
+    Write-Host "lossy AVIF decode skipped because WIC is unavailable"
+    continue
+  }
+  if ($status -ne 0 -or !(Test-Path -LiteralPath $encoded)) {
+    throw "QLIC rejected decodable lossy input: $name"
+  }
+  if (($message | Out-String) -notmatch
+      "warning: This source is lossy\.") {
+    throw "QLIC did not warn for lossy input: $name"
+  }
+  & $Qlic verify $encoded --threads 1 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "QLIC could not verify lossy input output: $name"
   }
 }
 

@@ -169,8 +169,11 @@ if ($webIndex -notmatch 'id="qlic-standalone-module"' -or
     $webIndex -notmatch 'id="savePng"' -or
     $webIndex -notmatch 'id="pixelInfo"' -or
     $webIndex -notmatch 'accept="\.qlic' -or
+    $webIndex -notmatch
+      'This source is lossy\. QLIC preserves its decoded pixels' -or
     $webIndex -notmatch 'touch-action:\s*none' -or
     $webIndex -match '__QLIC_WEB_(MODULE|WASM|WORKER)_BASE64__' -or
+    $webIndex -match 'known to be lossy, so it was not accepted' -or
     $webIndex -match 'QLIC Web\.exe') {
   throw "The Web archive does not contain a complete standalone browser app."
 }

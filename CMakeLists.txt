@@ -506,6 +506,9 @@ if(BUILD_TESTING)
       list(APPEND QLIC_TEST_TARGETS qlic-gui-test)
       add_test(NAME qlic-gui-controls
         COMMAND qlic-gui-test "$<TARGET_FILE:qlic-gui>")
+      add_test(NAME qlic-gui-lossy-warning
+        COMMAND qlic-gui-test "$<TARGET_FILE:qlic-gui>"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/input/lossy.jpg")
       add_test(NAME qlic-gui-view-native
         COMMAND qlic-gui-test "$<TARGET_FILE:qlic-gui>"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/native.qlic" "64 × 64")
@@ -521,7 +524,8 @@ if(BUILD_TESTING)
       add_test(NAME qlic-gui-view-hlg
         COMMAND qlic-gui-test "$<TARGET_FILE:qlic-gui>"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/hdr-u16-10-hlg-rgb.qlic" "2 × 2")
-      set_tests_properties(qlic-gui-controls qlic-gui-view-native
+      set_tests_properties(qlic-gui-controls qlic-gui-lossy-warning
+        qlic-gui-view-native
         qlic-gui-view-animation qlic-gui-view-wide24 qlic-gui-view-hdr10
         qlic-gui-view-hlg PROPERTIES TIMEOUT 15)
     endif()

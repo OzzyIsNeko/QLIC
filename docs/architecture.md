@@ -60,9 +60,9 @@ self-described color/HDR code values are lossless. Color transforms are
 reversible integer operations. Alpha is stored, not composited. HDR decode does
 not tone-map, change transfer functions, premultiply alpha, or reduce precision.
 
-Lossy source files are rejected by the import layer because lossless encoding
-of already-lossy pixels is easy to misrepresent as preservation of the
-original source.
+Lossy sources are decoded when a compatible adapter is available. The importer
+warns that QLIC preserves the decoded pixels, not detail already discarded by
+the source codec, and that the QLIC file will likely be larger.
 
 ### Bounded search
 
@@ -164,9 +164,9 @@ qlic info input.qlic --json
 qlic verify input.qlic
 ```
 
-PNG, WebP, JPEG XL, TIFF, AVIF where available, BMP, and WIC inputs are import
-adapters. They are not embedded in QLIC files. Wide and HDR files use native
-QSW1/QSW2 payloads, not PNG-in-a-wrapper.
+PNG, JPEG where available, WebP, JPEG XL, TIFF, AVIF where available, BMP, and
+WIC inputs are import adapters. They are not embedded in QLIC files. Wide and
+HDR files use native QSW1/QSW2 payloads, not PNG-in-a-wrapper.
 
 ### Windows GUI
 

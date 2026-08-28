@@ -89,11 +89,12 @@ Defaults are 256 MiB input/payload, 33,554,432 pixels per frame, 4,096 frames,
 256 MiB animation output, and 16 MiB HDR metadata. Lower them at the product
 boundary when needed.
 
-Browser image input accepts PNG, BMP, and lossless WebP and renders it to
-RGBA8. That input path cannot preserve source precision, metadata, animation,
-or hidden RGB under zero alpha. QLIC input decodes animation and exact RGBA8.
-Wide and HDR QLIC files use a clearly labeled 8-bit SDR preview; the API still
-returns their exact samples and metadata.
+Browser image input accepts formats the browser can decode and renders them to
+RGBA8. Known lossy JPEG and WebP sources show a size warning. This input path
+cannot preserve source precision, metadata, animation, or hidden RGB under zero
+alpha. QLIC input decodes animation and exact RGBA8. Wide and HDR QLIC files use
+a clearly labeled 8-bit SDR preview; the API still returns their exact samples
+and metadata.
 
 The responsive page is QLIC's current mobile surface. A native iOS or Android
 port is separate future work.
