@@ -144,6 +144,10 @@ if(MSVC AND CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
   list(APPEND QLIC_MAP_SOURCES codec/src/map_avx2.c)
   set_source_files_properties(codec/src/map_avx2.c PROPERTIES COMPILE_OPTIONS /arch:AVX2)
 endif()
+set(QLIC_BUNDLED_IMAGE_CODECS FALSE)
+if(WIN32 AND CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+  set(QLIC_BUNDLED_IMAGE_CODECS TRUE)
+endif()
 
 # sharing the object target keeps static and DLL codec builds identical
 set(QLIC_CORE_SOURCES
@@ -180,10 +184,12 @@ if(WIN32 AND QLIC_BUILD_CLI)
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/jxl/include")
   target_link_libraries(qlic PRIVATE
     Threads::Threads windowscodecs ole32 cabinet shell32)
-  add_custom_command(TARGET qlic POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-      "${CMAKE_CURRENT_SOURCE_DIR}/runtime/image-codecs"
-      "$<TARGET_FILE_DIR:qlic>/image-codecs")
+  if(QLIC_BUNDLED_IMAGE_CODECS)
+    add_custom_command(TARGET qlic POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/image-codecs"
+        "$<TARGET_FILE_DIR:qlic>/image-codecs")
+  endif()
 else()
   if(QLIC_BUILD_CLI)
     find_package(PNG REQUIRED)
@@ -525,10 +531,14 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/codec/src"
       "${CMAKE_CURRENT_SOURCE_DIR}/third_party/jxl/include")
     qlic_windows_unicode_target(qlic-input-test)
-    add_custom_command(TARGET qlic-input-test POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/image-codecs"
-        "$<TARGET_FILE_DIR:qlic-input-test>/image-codecs")
+    if(QLIC_BUNDLED_IMAGE_CODECS)
+      target_compile_definitions(qlic-input-test PRIVATE
+        QLIC_TEST_BUNDLED_IMAGE_CODECS)
+      add_custom_command(TARGET qlic-input-test POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/runtime/image-codecs"
+          "$<TARGET_FILE_DIR:qlic-input-test>/image-codecs")
+    endif()
 
     add_executable(qlic-lzms-test tests/lzms_test.c codec/src/lzms.c)
     target_include_directories(qlic-lzms-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/codec/src")
@@ -547,12 +557,17 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/rgb-lzms.qlic")
     if(TARGET qlic)
       find_program(QLIC_POWERSHELL NAMES pwsh powershell REQUIRED)
+      set(QLIC_INPUT_CLI_OPTIONS)
+      if(NOT QLIC_BUNDLED_IMAGE_CODECS)
+        list(APPEND QLIC_INPUT_CLI_OPTIONS -SkipBundledImageCodecs)
+      endif()
       add_test(NAME qlic-input-cli
         COMMAND "${QLIC_POWERSHELL}" -NoProfile -File
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/input_cli_test.ps1"
           -Qlic "$<TARGET_FILE:qlic>"
           -Fixtures "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/input"
-          -Output "${CMAKE_CURRENT_BINARY_DIR}/input-cli-test")
+          -Output "${CMAKE_CURRENT_BINARY_DIR}/input-cli-test"
+          ${QLIC_INPUT_CLI_OPTIONS})
     endif()
     if(TARGET qlic-wic)
       add_executable(qlic-wic-smoke tests/wic_smoke.c)
@@ -866,7 +881,7 @@ if(QLIC_RUNTIME_TARGETS)
     LIBRARY DESTINATION "${CMAKE_INSTALL_BINDIR}"
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 endif()
-if(WIN32 AND TARGET qlic)
+if(WIN32 AND TARGET qlic AND QLIC_BUNDLED_IMAGE_CODECS)
   install(DIRECTORY runtime/image-codecs
     DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif()

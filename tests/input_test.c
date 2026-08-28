@@ -219,13 +219,17 @@ int wmain(int argc, wchar_t **argv) {
       {L"base.bmp", 1, QLIC_INPUT_WIC},
       {L"lossless.tiff", 1, QLIC_INPUT_WIC},
       {L"lossless.avif", 1, QLIC_INPUT_WIC},
+#ifdef QLIC_TEST_BUNDLED_IMAGE_CODECS
       {L"lossless.webp", 1, QLIC_INPUT_WEBP},
       {L"lossless.jxl", 1, QLIC_INPUT_JXL},
+#endif
       {L"lossy.jpg", 0, QLIC_INPUT_WIC},
       {L"lossy.tiff", 0, QLIC_INPUT_WIC},
       {L"lossy.avif", 0, QLIC_INPUT_WIC},
+#ifdef QLIC_TEST_BUNDLED_IMAGE_CODECS
       {L"lossy.webp", 0, QLIC_INPUT_WEBP},
       {L"lossy.jxl", 0, QLIC_INPUT_JXL},
+#endif
       {L"high16.png", 1, QLIC_INPUT_WIC},
   };
   int ok = 1;
@@ -248,10 +252,10 @@ int wmain(int argc, wchar_t **argv) {
   }
   qlic_input_close(&high16);
 
-  QlicInputImage webp = {0};
-  QlicInputImage jxl = {0};
-  Case webp_case = {L"lossless.webp", 1, QLIC_INPUT_WEBP};
-  Case jxl_case = {L"lossless.jxl", 1, QLIC_INPUT_JXL};
+#ifdef QLIC_TEST_BUNDLED_IMAGE_CODECS
+  QlicInputImage webp = {0}, jxl = {0};
+  const Case webp_case = {L"lossless.webp", 1, QLIC_INPUT_WEBP};
+  const Case jxl_case = {L"lossless.jxl", 1, QLIC_INPUT_JXL};
   ok &= check_case(argv[1], &webp_case, &webp);
   ok &= check_case(argv[1], &jxl_case, &jxl);
   if (!webp.rgba || !jxl.rgba ||
@@ -261,6 +265,7 @@ int wmain(int argc, wchar_t **argv) {
   }
   free(webp.rgba);
   free(jxl.rgba);
+#endif
   if (ok)
     printf("input format checks passed\n");
   return ok ? 0 : 1;

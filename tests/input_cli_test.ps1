@@ -4,7 +4,8 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$Fixtures,
   [Parameter(Mandatory = $true)]
-  [string]$Output
+  [string]$Output,
+  [switch]$SkipBundledImageCodecs
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,10 +21,11 @@ $accepted = @(
   "base.png",
   "base.bmp",
   "lossless.tiff",
-  "lossless.webp",
-  "lossless.jxl",
   "lossless.avif"
 )
+if (!$SkipBundledImageCodecs) {
+  $accepted += "lossless.webp", "lossless.jxl"
+}
 $avifDecoderAvailable = $true
 $hashes = foreach ($name in $accepted) {
   $encoded = Join-Path $Output "$name.qlic"
@@ -89,10 +91,11 @@ if ($status -ne 0 -and !$avifDecoderAvailable -and
 $rejected = @(
   "lossy.jpg",
   "lossy.tiff",
-  "lossy.webp",
-  "lossy.jxl",
   "lossy.avif"
 )
+if (!$SkipBundledImageCodecs) {
+  $rejected += "lossy.webp", "lossy.jxl"
+}
 foreach ($name in $rejected) {
   $encoded = Join-Path $Output "$name.qlic"
   [IO.File]::Delete($encoded)

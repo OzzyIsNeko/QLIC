@@ -1529,11 +1529,20 @@ static int hdr_image_test(void) {
   qlic_hdr_image *legacy_hdr = (qlic_hdr_image *)(void *)legacy_hdr_storage;
   if (!check(legacy_hdr != NULL, "allocate legacy HDR ABI probe"))
     goto done;
-  legacy_hdr->struct_size = QLIC_HDR_IMAGE_V1_SIZE;
+  const uint32_t legacy_hdr_size = QLIC_HDR_IMAGE_V1_SIZE;
+  memcpy(legacy_hdr_storage + offsetof(qlic_hdr_image, struct_size),
+         &legacy_hdr_size, sizeof(legacy_hdr_size));
   int legacy_hdr_result =
       qlic_decode_hdr(encoded, encoded_size, NULL, legacy_hdr);
+  void *legacy_pixels = NULL;
+  uint8_t *legacy_icc = NULL;
+  memcpy(&legacy_pixels,
+         legacy_hdr_storage + offsetof(qlic_hdr_image, pixels),
+         sizeof(legacy_pixels));
+  memcpy(&legacy_icc, legacy_hdr_storage + offsetof(qlic_hdr_image, icc),
+         sizeof(legacy_icc));
   int legacy_hdr_ok = legacy_hdr_result == QLIC_UNSUPPORTED_FORMAT &&
-                      legacy_hdr->pixels == NULL && legacy_hdr->icc == NULL;
+                      legacy_pixels == NULL && legacy_icc == NULL;
   qlic_hdr_image_free(legacy_hdr);
   free(legacy_hdr_storage);
   if (!check(legacy_hdr_ok, "reject metadata loss through legacy HDR ABI"))
