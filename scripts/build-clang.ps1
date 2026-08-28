@@ -51,7 +51,9 @@ $profileOption = if ($PgoProfile) { " -D QLIC_PGO_PROFILE=`"$PgoProfile`"" } els
 $nativeOption = if ($Native) { "ON" } else { "OFF" }
 $streamTraceOption = if ($StreamTrace) { "ON" } else { "OFF" }
 $benchmarkTrialOption = if ($BenchmarkTrial) { "ON" } else { "OFF" }
-$command = "call `"$vcvars`" >nul && cmake -S `"$root`" -B `"$out`" -G `"NMake Makefiles`" -D CMAKE_C_COMPILER=`"$clang`" -D CMAKE_BUILD_TYPE=`"$Config`" -D BUILD_TESTING=ON -D QLIC_SANITIZE=$sanitizeOption -D QLIC_PGO=$pgoOption -D QLIC_NATIVE=$nativeOption -D QLIC_STREAM_TRACE=$streamTraceOption -D QLIC_BENCHMARK_TRIAL=$benchmarkTrialOption$profileOption && cmake --build `"$out`" --parallel$testCommand"
+# clang-cl assigns conflicting ODR keys to unrelated C string literals.
+$asanEnvironment = if ($Sanitize) { 'set "ASAN_OPTIONS=detect_odr_violation=0" && ' } else { "" }
+$command = "${asanEnvironment}call `"$vcvars`" >nul && cmake -S `"$root`" -B `"$out`" -G `"NMake Makefiles`" -D CMAKE_C_COMPILER=`"$clang`" -D CMAKE_BUILD_TYPE=`"$Config`" -D BUILD_TESTING=ON -D QLIC_SANITIZE=$sanitizeOption -D QLIC_PGO=$pgoOption -D QLIC_NATIVE=$nativeOption -D QLIC_STREAM_TRACE=$streamTraceOption -D QLIC_BENCHMARK_TRIAL=$benchmarkTrialOption$profileOption && cmake --build `"$out`" --parallel$testCommand"
 cmd /d /s /c $command
 if ($LASTEXITCODE -ne 0) { throw "Clang build or tests failed." }
 
