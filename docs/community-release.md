@@ -6,7 +6,7 @@ codec, conformance, WebAssembly, package, checksum, SBOM, and provenance checks.
 Every archive contains `UNSIGNED-COMMUNITY-RELEASE.txt`, provenance records the
 `community` channel, and the release notes explain Windows SmartScreen behavior.
 
-Stage a release candidate without publishing it:
+Stage the release bundle without publishing it:
 
 ```powershell
 .\scripts\stage-community-release.ps1

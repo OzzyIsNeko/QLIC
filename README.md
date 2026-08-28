@@ -145,7 +145,7 @@ and [support](SUPPORT.md).
 Build the seven local packages with `.\scripts\package.ps1`. Output goes to
 `dist` with checksums and SPDX SBOMs.
 
-Stage a verified unsigned public release candidate with
+Stage a verified unsigned public release bundle with
 `.\scripts\stage-community-release.ps1`. It writes the exact upload set under
 `release` without committing, tagging, signing, or publishing anything. See
 [community-release.md](docs/community-release.md).

@@ -16,7 +16,7 @@ $assetsPath = Join-Path $release "RELEASE-ASSETS.json"
 $releaseSums = Join-Path $upload "RELEASE-SHA256SUMS.txt"
 foreach ($path in @($upload, $metadata, $assetsPath, $releaseSums)) {
   if (!(Test-Path -LiteralPath $path)) {
-    throw "Release candidate is missing $path"
+    throw "Release bundle is missing $path"
   }
 }
 
@@ -141,6 +141,6 @@ $expectedMetadata = @(
 ) + @($expectedSboms | ForEach-Object { "sbom/$_" })
 Assert-NameSet $metadataEntries $expectedMetadata "Release metadata archive"
 
-Write-Host "QLIC $($assets.version) unsigned community release candidate verified."
+Write-Host "QLIC $($assets.version) unsigned community release verified."
 Write-Host "Source revision: $sourceRevision"
 Write-Host "Upload directory: $upload"
