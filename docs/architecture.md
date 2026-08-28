@@ -818,31 +818,29 @@ or a few files.
 
 ### Compression and encode speed
 
-The accepted 3,167-image checkpoint is 1,163,128,771 bytes. Its pinned
-one-thread encode campaign took 514.989 seconds at the immediately preceding
-checkpoint. The final release was then revalidated across the complete corpus:
-15 outputs became smaller, 3,152 tied byte-for-byte, none grew, and every file
-decoded exactly. The source tree, binaries, corpus, codec versions, affinity,
-and result rows remain in the development evidence workspace. Selected effort
-rows are:
+The accepted 3,167-image checkpoint is 1,160,913,984 bytes. Its pinned
+one-thread release campaign took 618.673 seconds. Every file decoded exactly.
+The source tree, binaries, corpus, codec versions, affinity, and result rows
+remain in the development evidence workspace. QLIC, JPEG XL effort 9, and WebP
+preset 6 were rerun together; the other selected effort rows are retained
+same-machine context:
 
 | Codec | Effort | Bytes | Encode seconds | Bytes vs QLIC |
 | --- | ---: | ---: | ---: | ---: |
-| QLIC | current | 1,163,128,771 | 514.989* | — |
-| JPEG XL | 1 | 1,546,891,144 | 111.053 | +32.994% |
-| JPEG XL | 3 | 1,311,022,795 | 274.373 | +12.715% |
-| JPEG XL | 6 | 1,214,206,451 | 754.620 | +4.391% |
-| JPEG XL | 8 | 1,171,971,513 | 2,977.934 | +0.760% |
-| JPEG XL | 9 | 1,164,424,898 | 5,286.575 | +0.111% |
-| WebP | 1 | 1,339,854,110 | 296.869 | +15.194% |
-| WebP | 6 | 1,289,518,274 | 544.911 | +10.866% |
-| WebP | 9 | 1,256,259,092 | 9,032.945 | +8.007% |
-| OxiPNG | 6 | 1,618,637,169 | 9,105.634 | +39.162% |
+| QLIC | current | 1,160,913,984 | 618.673 | — |
+| JPEG XL | 1 | 1,546,891,144 | 111.053 | +33.248% |
+| JPEG XL | 3 | 1,311,022,795 | 274.373 | +12.930% |
+| JPEG XL | 6 | 1,214,206,451 | 754.620 | +4.591% |
+| JPEG XL | 8 | 1,171,971,513 | 2,977.934 | +0.952% |
+| JPEG XL | 9 | 1,164,424,898 | 5,674.173 | +0.302% |
+| WebP | 1 | 1,339,854,110 | 296.869 | +15.414% |
+| WebP | 6 | 1,289,518,274 | 585.964 | +11.078% |
+| WebP | 9 | 1,256,259,092 | 9,032.945 | +8.213% |
+| OxiPNG | 6 | 1,618,637,169 | 9,105.634 | +39.428% |
 
-QLIC is 1,296,127 bytes smaller than JPEG XL effort 9. The starred QLIC encode
-time is retained for scale and was not rerun after the final 15-file routing
-delta. This is a strong aggregate result, not proof that QLIC is smaller on
-every file or dataset.
+QLIC is 3,510,914 bytes smaller than JPEG XL effort 9. It is smaller on 1,861
+files, larger on 1,304, and tied on two. This is a strong aggregate result, not
+proof that QLIC is smaller on every file or dataset.
 
 The wider qualification line has 10,628 images. Before the current tile retry,
 QLIC used 4,613,558,918 bytes, JPEG XL effort 8 used 4,607,544,830, and effort
@@ -859,28 +857,26 @@ learned entropy-context partition rather than one missing predictor.
 
 ### Decode speed
 
-The final release decoder sweep uses the same 3,167 files and exact final QLIC
-streams as the encode matrix. One QLIC stream at a time is preloaded, warmed
-once, decoded three times to memory on a pinned core, and compared exactly. The
-comparison rows are retained from the same-machine, same-harness effort sweep.
+The final release decoder sweep uses the same 3,167 files and exact final
+streams as the encode matrix. Each codec performs one untimed exact decode,
+then three measured pinned process runs per file. Wall time includes process
+startup and output file I/O.
 
 | Decoder | Seconds | MP/s | Relative to measured QLIC |
 | --- | ---: | ---: | ---: |
-| QLIC portable release | 133.949 | 14.665 | baseline |
-| JPEG XL effort 3 | 127.451 | 15.41 | 4.85% faster |
-| JPEG XL effort 9 | 192.478 | 10.21 | 43.69% slower |
-| WebP effort 6 | 19.847 | 98.97 | 85.18% faster |
-| WebP effort 9 | 18.689 | 105.11 | 86.05% faster |
-| WIC PNG / OxiPNG 6 files | 11.429 | 171.87 | 91.47% faster |
+| QLIC portable release | 236.927 | 8.291 | baseline |
+| JPEG XL effort 9 | 307.602 | 6.386 | 29.83% slower |
+| WebP preset 6 | 117.887 | 16.663 | 50.24% faster |
 
-The portable QLIC release is 4.85% slower than JPEG XL effort 3 and uses 30.41%
-less time than JPEG XL effort 9. The result includes the accepted transform and
-reachable-probability-grid work instead of estimating their effect from older
-paired campaigns or substituting the faster native-PGO lab binary.
+The portable QLIC release uses 22.98% less time than JPEG XL effort 9. The
+result includes the accepted transform and reachable-probability-grid work
+instead of estimating their effect from older paired campaigns or substituting
+the faster native-PGO lab binary.
 
-The product-level weakness is plain: WebP and PNG decode many times faster.
-They are also materially larger on this corpus. QLIC currently chooses density
-and reasonable CPU over instant decode.
+The product-level weakness is plain: WebP decodes faster, and PNG-family
+decoders are faster in the retained sweep. Their files are also materially
+larger on this corpus. QLIC currently chooses density and reasonable CPU over
+instant decode.
 
 ### Current output distribution
 
@@ -888,8 +884,8 @@ The current 3,167-file result is concentrated:
 
 | Final native mode | Files | Bytes |
 | ---: | ---: | ---: |
-| 52 | 1,606 | 968,310,007 |
-| 37 | 144 | 83,623,407 |
+| 52 | 1,621 | 991,584,064 |
+| 37 | 129 | 58,134,563 |
 | 53 | 76 | 27,112,318 |
 | 1 | 671 | 17,537,242 |
 | 45 | 46 | 16,099,073 |
