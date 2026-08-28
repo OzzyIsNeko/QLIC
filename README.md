@@ -10,6 +10,7 @@ has no effort or quality setting.
 This is the only QLIC 1.0 source tree.
 
 Try the [web demo](https://qlic.pages.dev/).
+See [benchmarks](https://qlic.pages.dev/benchmarks/).
 
 ## Components
 
