@@ -27,7 +27,7 @@ BEGIN
       VALUE "FileVersion", QLIC_VERSION_TEXT "\0"
       VALUE "InternalName", "@QLIC_INTERNAL_NAME@\0"
       VALUE "OriginalFilename", "@QLIC_ORIGINAL_FILENAME@\0"
-      VALUE "LegalCopyright", "Copyright 2026 QLIC contributors\0"
+      VALUE "LegalCopyright", "Copyright 2026 Ozzy M.\0"
       VALUE "ProductName", "QLIC\0"
       VALUE "ProductVersion", QLIC_VERSION_TEXT "\0"
     END

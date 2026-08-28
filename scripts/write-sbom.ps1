@@ -88,7 +88,7 @@ $document = [ordered]@{
       licenseConcluded = "NOASSERTION"
       licenseDeclared = $License
       licenseInfoFromFiles = @("NOASSERTION")
-      copyrightText = "Copyright 2026 QLIC contributors"
+      copyrightText = "Copyright 2026 Ozzy M."
     }
   )
   files = @($spdxFiles)

@@ -1535,7 +1535,7 @@ static HRESULT reg_write(HKEY root) {
   REG_SET(reg_sz(k, NULL, L"QLIC WIC Decoder"));
   REG_SET(reg_sz(k, L"FriendlyName", L"QLIC Decoder"));
   REG_SET(reg_sz(k, L"Description", L"Quick Lossless Image Codec Decoder"));
-  REG_SET(reg_sz(k, L"Author", L"QLIC Project"));
+  REG_SET(reg_sz(k, L"Author", L"Ozzy M."));
   REG_SET(reg_sz(k, L"Vendor", QLIC_VENDOR_TEXT));
   REG_SET(reg_sz(k, L"Version", QLIC_VERSION_W L".0"));
   REG_SET(reg_sz(k, L"SpecVersion", L"1.0.0.0"));
