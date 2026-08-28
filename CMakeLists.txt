@@ -659,24 +659,26 @@ if(BUILD_TESTING)
         COMMAND qlic pack
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/input/lossless.avif"
           "${CMAKE_CURRENT_BINARY_DIR}/cli-test/base-avif.qlic")
-      add_test(NAME qlic-linux-reject-lossy-avif
-        COMMAND qlic pack
-          "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/input/lossy.avif"
-          "${CMAKE_CURRENT_BINARY_DIR}/cli-test/lossy-avif.qlic")
-      set_tests_properties(qlic-linux-reject-lossy-avif
-        PROPERTIES WILL_FAIL TRUE)
+      add_test(NAME qlic-linux-pack-lossy-avif
+        COMMAND "${CMAKE_COMMAND}"
+          "-DQLIC=$<TARGET_FILE:qlic>"
+          "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/input/lossy.avif"
+          "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/cli-test/lossy-avif.qlic"
+          "-DDECODED=${CMAKE_CURRENT_BINARY_DIR}/cli-test/lossy-avif.png"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_lossy_input.cmake")
     endif()
     if(TARGET PkgConfig::QLIC_TIFF)
       add_test(NAME qlic-linux-pack-tiff
         COMMAND qlic pack
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/input/lossless.tiff"
           "${CMAKE_CURRENT_BINARY_DIR}/cli-test/base-tiff.qlic")
-      add_test(NAME qlic-linux-reject-lossy-tiff
-        COMMAND qlic pack
-          "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/input/lossy.tiff"
-          "${CMAKE_CURRENT_BINARY_DIR}/cli-test/lossy-tiff.qlic")
-      set_tests_properties(qlic-linux-reject-lossy-tiff
-        PROPERTIES WILL_FAIL TRUE)
+      add_test(NAME qlic-linux-pack-lossy-tiff
+        COMMAND "${CMAKE_COMMAND}"
+          "-DQLIC=$<TARGET_FILE:qlic>"
+          "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/input/lossy.tiff"
+          "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/cli-test/lossy-tiff.qlic"
+          "-DDECODED=${CMAKE_CURRENT_BINARY_DIR}/cli-test/lossy-tiff.png"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_lossy_input.cmake")
     endif()
   endif()
 
