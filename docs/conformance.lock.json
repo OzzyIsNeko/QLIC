@@ -7,7 +7,7 @@
   },
   "normative_data": {
     "docs/profiles.json": "8cbcabfa08cd566ef2008d557bf16edf8b0701c14843a93c27b623493d95b338",
-    "tests/fixtures/manifest.json": "2166a585575d7becf2202e195d9ecd0bef5d7fa22f77fa913f4285dbbc4a31d8",
+    "tests/fixtures/manifest.json": "e405531feac3538484028bb5104a0494e850269d92ae2ed1fa5e9574f7a8b24a",
     "tests/fixtures/negative-manifest.json": "7e9388f5b49fd7e029ade014ff66297346b2af1f88b0da3d5a714b260bb44ea8"
   }
 }
