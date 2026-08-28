@@ -150,16 +150,15 @@ impl<'a> RangeDecoder<'a> {
             }
         }
         let boundary = (self.range >> PROB_BITS).wrapping_mul(chance);
-        let bit;
-        if self.code < boundary {
+        let bit = if self.code < boundary {
             self.range = boundary;
-            bit = 0;
+            0
         } else {
             self.range = self.range.wrapping_sub(boundary);
             self.code = self.code.wrapping_sub(boundary);
             *state |= 1;
-            bit = 1;
-        }
+            1
+        };
         let delta = (probability.recent >> (PROB_DENOMINATOR - 1)) as i32 - bit as i32;
         probability.zeros = (probability.zeros as i32).wrapping_add(delta) as u32;
         probability.recent = (probability.recent << 1) | u64::from(bit);
