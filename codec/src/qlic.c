@@ -12695,9 +12695,11 @@ static uint32_t cli_tiff_u32(const uint8_t *data, int little) {
 
 static const uint8_t *cli_exif_tiff(const uint8_t *data, size_t size,
                                     size_t *tiff_size) {
-  if (size >= 6u && !memcmp(data, "Exif\0\0", 6u)) {
-    data += 6u;
-    size -= 6u;
+  static const uint8_t exif_prefix[] = {'E', 'x', 'i', 'f', 0u, 0u};
+  if (size >= sizeof(exif_prefix) &&
+      !memcmp(data, exif_prefix, sizeof(exif_prefix))) {
+    data += sizeof(exif_prefix);
+    size -= sizeof(exif_prefix);
   }
   if (size >= 12u) {
     uint32_t offset = ((uint32_t)data[0] << 24u) |

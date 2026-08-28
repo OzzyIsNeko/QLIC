@@ -909,6 +909,7 @@ static int collect_tiff_metadata(QlicInput *input, char *error,
 
 static int collect_jxl_metadata(QlicInput *input, char *error,
                                 size_t error_capacity) {
+  static const uint8_t exif_box_type[] = {'E', 'x', 'i', 'f'};
   const uint8_t *data = input->data;
   size_t size = input->size;
   if (size < 12u || memcmp(data + 4u, "JXL ", 4u))
@@ -930,7 +931,7 @@ static int collect_jxl_metadata(QlicInput *input, char *error,
     const uint8_t *payload = data + offset + header;
     size_t payload_size = (size_t)box_size - header;
     const uint8_t *tag = NULL;
-    if (!memcmp(type, "Exif", 4u))
+    if (!memcmp(type, exif_box_type, sizeof(exif_box_type)))
       tag = (const uint8_t *)"EXIF";
     else if (!memcmp(type, "xml ", 4u))
       tag = (const uint8_t *)"XMP_";
